@@ -1,0 +1,3 @@
+release:
+  require_integration_pass: true
+  require_schema_compatibility: true

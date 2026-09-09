@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://verifierci.dev/schemas/job.schema.json",
+  "title": "Job",
+  "type": "object",
+  "properties": {
+    "task_id": {"type": "string"},
+    "strategy": {"type": "string"}
+  }
+}

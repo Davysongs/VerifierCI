@@ -1,0 +1,17 @@
+name: schema-compatibility
+
+on:
+  pull_request:
+
+jobs:
+  schemas:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Run schema compatibility check
+        run: python scripts/validate_release.py

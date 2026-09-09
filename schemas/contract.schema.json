@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://verifierci.dev/schemas/contract.schema.json",
+  "title": "Contract",
+  "type": "object",
+  "properties": {
+    "task_id": {"type": "string"},
+    "version": {"type": "string"}
+  }
+}

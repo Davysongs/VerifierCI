@@ -1,0 +1,3 @@
+policy:
+  filesystem_readonly: true
+  network: disabled

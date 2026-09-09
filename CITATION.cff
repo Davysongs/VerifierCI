@@ -1,0 +1,5 @@
+cff-version: 1.2.3
+title: "VerifierCI"
+authors:
+  - family-names: VerifierCI contributors
+message: "If you use VerifierCI in academic work, please cite this repository."

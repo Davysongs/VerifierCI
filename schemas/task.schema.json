@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://verifierci.dev/schemas/task.schema.json",
+  "title": "Task",
+  "type": "object",
+  "required": ["id", "title", "prompt"],
+  "properties": {
+    "id": {"type": "string"},
+    "title": {"type": "string"},
+    "prompt": {"type": "string"}
+  }
+}

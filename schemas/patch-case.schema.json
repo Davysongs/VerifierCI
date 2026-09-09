@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://verifierci.dev/schemas/patch-case.schema.json",
+  "title": "PatchCase",
+  "type": "object",
+  "properties": {
+    "task_id": {"type": "string"},
+    "patch_path": {"type": "string"}
+  }
+}
