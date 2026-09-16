@@ -1,0 +1,49 @@
+# Retry-contract example contract
+#
+# Specifies the normative behavioural requirements for the retry task.
+# SDD Section 1.3 normative resolutions apply.
+#
+task_id: retry-contract
+version: "1.0.0"
+requirements:
+  - requirement_id: REQ-TRANSIENT-RETRY
+    text: >
+      On a TransientError, the function must retry the call. At most
+      max_retries (default 3) retries are performed after the initial call,
+      giving at most 4 total calls.
+    source_kind: explicit
+    source_locator: "SDD §1.3 (normative counting convention)"
+    allowed_variation: >
+      The implementation may track retries with a counter, recursion, or
+      any equivalent mechanism, provided the call count bound is respected.
+
+  - requirement_id: REQ-PERMANENT-IMMEDIATE
+    text: >
+      On a PermanentError, the function must return the error immediately
+      without any further retry attempt.
+    source_kind: explicit
+    source_locator: "SDD §1.3"
+    allowed_variation: "None. No retry of permanent failures is permitted."
+
+  - requirement_id: REQ-SUCCESS-IMMEDIATE
+    text: >
+      On success, the function must return the result immediately without
+      performing any further calls to fn.
+    source_kind: explicit
+    source_locator: "SDD §1.3"
+    allowed_variation: "None."
+
+  - requirement_id: REQ-NO-PRIVATE-STRUCTURE
+    text: >
+      The implementation must not be required to use any specific private
+      helper name or internal structure. Any implementation satisfying
+      REQ-TRANSIENT-RETRY, REQ-PERMANENT-IMMEDIATE and REQ-SUCCESS-IMMEDIATE
+      is valid.
+    source_kind: explicit
+    source_locator: "SDD §1.3 (motivating example: valid alternative rejected)"
+    allowed_variation: "Full freedom of implementation structure."
+
+allowed_variation: >
+  Implementations may differ in internal helper names, loop vs recursion,
+  exception chaining, and logging, provided all REQ-* hold.
+unresolved_questions: []

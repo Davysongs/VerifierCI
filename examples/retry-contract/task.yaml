@@ -1,0 +1,34 @@
+# Retry-contract example task
+#
+# This is the illustrative task from SDD Section 1.3.
+# The task requires retrying transient failures at most three times while
+# immediately returning permanent failures.
+#
+# Counting convention (SDD Section 1.3, normative):
+#   "at most one initial call plus three retries, four calls total"
+#   A permanent failure ends processing after that call.
+#   Success returns immediately.
+#
+# This file is the native local-adapter task definition used by:
+#   make slice
+#   make demo
+#
+task_id: retry-contract
+version: "1.0.0"
+statement: |
+  Implement a function `retry(fn, max_retries=3)` that calls `fn()` and
+  retries on transient failures (TransientError) up to `max_retries` times.
+  Permanent failures (PermanentError) are returned immediately without retry.
+  On success, return the result immediately.
+  The total number of calls is at most 1 + max_retries = 4.
+adapter: local
+contract: contract.yaml
+snapshot: source/
+environment:
+  backend: fixture
+  runtime_fingerprint: "cpython-3.12"
+  resource_policy: configs/sandbox-policy.yaml
+licence: Apache-2.0
+provenance: "examples/retry-contract (synthetic fixture, SDD §1.3)"
+eligibility: eligible
+notes: "Illustrative example only. Not an observed benchmark result."
