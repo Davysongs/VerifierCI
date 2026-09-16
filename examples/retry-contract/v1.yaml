@@ -29,3 +29,4 @@ compatible_contract_versions:
 notes: >
   Baseline verifier. Does not assert against private helper names.
   Weak on permanent-failure retry detection (SDD §1.3 motivating table).
+

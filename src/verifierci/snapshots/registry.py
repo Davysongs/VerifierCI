@@ -13,3 +13,4 @@ class SnapshotRegistry:
     A missing or mismatched archive produces SNAPSHOT_UNAVAILABLE or DIGEST_MISMATCH;
     no substitute commit or image is selected.
     """
+

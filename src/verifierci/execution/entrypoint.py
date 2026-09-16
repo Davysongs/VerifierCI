@@ -16,3 +16,4 @@ def main() -> None:
     Called by the controller or directly for trusted-fixture runs.
     """
     raise NotImplementedError("Phase 1 entrypoint stub.")
+

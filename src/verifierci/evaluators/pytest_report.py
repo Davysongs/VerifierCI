@@ -24,3 +24,4 @@ class PytestReportParser:
     Verifies the report and expected test identities before producing
     an outcome.  Does not consult independent adjudication.
     """
+

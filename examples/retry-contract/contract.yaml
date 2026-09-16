@@ -47,3 +47,4 @@ allowed_variation: >
   Implementations may differ in internal helper names, loop vs recursion,
   exception chaining, and logging, provided all REQ-* hold.
 unresolved_questions: []
+

@@ -33,3 +33,4 @@ def valid_rejection_rate(
     if total_valid == 0:
         return None
     return rejected / total_valid
+

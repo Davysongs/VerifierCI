@@ -20,3 +20,4 @@ class Worker:
     Claims one job, executes it inside the declared sandbox, collects
     bounded artifacts and commits the attempt result through the lease fence.
     """
+

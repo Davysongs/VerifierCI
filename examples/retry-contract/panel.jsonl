@@ -5,3 +5,4 @@
 {"case_id": "case-exceeds-retry-count", "role": "challenge", "source": "human", "diff": "patches/exceeds-retry-count.patch", "adjudication": {"label": "invalid", "review_status": "provisional", "rationale": "Performs more than max_retries retries; violates REQ-TRANSIENT-RETRY call-count bound.", "witness": "sequences/exceed-count-sequence.json"}, "family_id": "fault-family"},
 {"case_id": "case-noop", "role": "noop", "source": "noop", "diff": "", "adjudication": {"label": "valid", "review_status": "provisional", "rationale": "No-op preserves its declared base."}, "family_id": "control-family", "expected_control_outcomes": {"retry-contract-v1": "accepted", "retry-contract-v2": "accepted"}}
 ]}
+

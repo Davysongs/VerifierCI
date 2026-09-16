@@ -32,3 +32,4 @@ licence: Apache-2.0
 provenance: "examples/retry-contract (synthetic fixture, SDD §1.3)"
 eligibility: eligible
 notes: "Illustrative example only. Not an observed benchmark result."
+

@@ -15,3 +15,4 @@ class ReportRenderer:
 
     Outputs are written atomically: the previous file is preserved on failure.
     """
+

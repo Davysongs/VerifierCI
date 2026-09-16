@@ -26,3 +26,4 @@ class EventWriter:
     Emits TelemetryEvents to a configured sink.  Sensitive fields are
     excluded before emission.
     """
+

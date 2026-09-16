@@ -1,0 +1,8 @@
+{"panel_id": "sample-five-case", "version": "1.0.0", "split": "development", "sampling_policy": "Synthetic five-case JSONL example for documentation and adapter testing. Not for assessment claims.", "cases": [
+{"case_id": "sample-reference", "role": "reference", "source": "reference", "diff_digest": "placeholder", "family_id": "family-a", "adjudication": {"label": "valid", "review_status": "provisional", "rationale": "Synthetic reference case."}},
+{"case_id": "sample-valid-alt", "role": "challenge", "source": "human", "diff_digest": "placeholder", "family_id": "family-b", "adjudication": {"label": "valid", "review_status": "provisional", "rationale": "Synthetic valid alternative case."}},
+{"case_id": "sample-invalid-1", "role": "challenge", "source": "human", "diff_digest": "placeholder", "family_id": "family-c", "adjudication": {"label": "invalid", "review_status": "provisional", "rationale": "Synthetic invalid case."}},
+{"case_id": "sample-invalid-2", "role": "challenge", "source": "human", "diff_digest": "placeholder", "family_id": "family-c", "adjudication": {"label": "invalid", "review_status": "provisional", "rationale": "Synthetic invalid case, same fault family."}},
+{"case_id": "sample-noop", "role": "noop", "source": "noop", "diff_digest": "placeholder", "family_id": "control", "adjudication": {"label": "valid", "review_status": "provisional", "rationale": "No-op control case."}, "expected_control_outcomes": {}}
+]}
+

@@ -15,3 +15,4 @@ class ArtifactStore:
     Artifacts are identified by their 64-character lowercase hex SHA-256 digest.
     The store rejects links, duplicate paths, excess bytes and malformed archives.
     """
+

@@ -22,3 +22,4 @@ class Database:
     Claim expiry records an abandoned attempt and requeues only eligible jobs.
     The controller is the sole database writer service.
     """
+
