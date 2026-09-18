@@ -594,6 +594,13 @@ def _instantiate_dataclass(cls: Any, data: Any) -> Any:
             f"Expected dict for dataclass {cls.__name__}, got {type(data).__name__}."
         )
 
+    allowed_fields = {f.name for f in fields(cls)}
+    extra_fields = set(data) - allowed_fields
+    if extra_fields:
+        raise ValidationError(
+            f"Unexpected field(s) for {cls.__name__}: {sorted(extra_fields)}."
+        )
+
     try:
         field_types = get_type_hints(cls, localns=_KIND_REGISTRY)
     except Exception as exc:

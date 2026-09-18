@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import FrozenInstanceError
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 
@@ -225,6 +225,44 @@ def test_validate_task():
     )
     with pytest.raises(ValidationError, match="task_key"):
         validate_task(bad_key_task, contract)
+
+    # Naive created_at
+    naive_dt_task = Task(
+        task_key="task-1@1.0.0",
+        task_id="task-1",
+        version="1.0.0",
+        statement="Implement retry",
+        adapter="local",
+        contract_hash=contract.contract_hash,
+        snapshot_digest="0" * 64,
+        environment_id="env-fixture-1",
+        licence="Apache-2.0",
+        provenance="repo",
+        eligibility="eligible",
+        notes="",
+        created_at=datetime(2026, 9, 18, 16, 0, 0),
+    )
+    with pytest.raises(ValidationError, match="timezone-aware UTC"):
+        validate_task(naive_dt_task, contract)
+
+    # Non-UTC timezone
+    est_task = Task(
+        task_key="task-1@1.0.0",
+        task_id="task-1",
+        version="1.0.0",
+        statement="Implement retry",
+        adapter="local",
+        contract_hash=contract.contract_hash,
+        snapshot_digest="0" * 64,
+        environment_id="env-fixture-1",
+        licence="Apache-2.0",
+        provenance="repo",
+        eligibility="eligible",
+        notes="",
+        created_at=datetime(2026, 9, 18, 16, 0, 0, tzinfo=timezone(timedelta(hours=5))),
+    )
+    with pytest.raises(ValidationError, match="timezone-aware UTC"):
+        validate_task(est_task, contract)
 
 
 def test_resolve_command_placeholders():
@@ -632,45 +670,27 @@ def test_decode_record_unwraps_optional_and_union():
     assert outcome.report.results[0].status == "passed"
 
 
-def test_register_verifier_persists_to_sqlite():
+def test_decode_record_rejects_unknown_fields():
+    data = {
+        "requirement_id": "req-1",
+        "description": "Test requirement",
+        "rationale": "Rationale",
+        "verification_hint": "",
+        "tags": ["unit"],
+        "version": 1,
+        "unexpected_extra_field": "disallowed",
+    }
+    payload = json.dumps(data).encode("utf-8")
+    with pytest.raises(ValidationError, match="Unexpected field"):
+        decode_record("Requirement", payload)
+
+
+def test_register_verifier_stub_raises_not_implemented():
     import sqlite3
 
     from verifierci.models import register_verifier
 
     conn = sqlite3.connect(":memory:")
-    conn.execute(
-        """
-        CREATE TABLE verifier_manifests (
-            manifest_hash TEXT PRIMARY KEY,
-            mode TEXT NOT NULL,
-            command TEXT NOT NULL,
-            build_command TEXT NOT NULL,
-            expected_collection TEXT NOT NULL,
-            parser_id TEXT NOT NULL,
-            report_path TEXT NOT NULL,
-            payload_digest TEXT NOT NULL,
-            allowed_edit_paths TEXT NOT NULL,
-            required_pass_ids TEXT NOT NULL,
-            permitted_skips TEXT NOT NULL,
-            timeout_seconds INTEGER NOT NULL
-        );
-        """
-    )
-    conn.execute(
-        """
-        CREATE TABLE verifier_versions (
-            verifier_key TEXT PRIMARY KEY,
-            verifier_id TEXT NOT NULL,
-            version TEXT NOT NULL,
-            parent_key TEXT,
-            manifest_hash TEXT NOT NULL,
-            payload_digest TEXT NOT NULL,
-            compatible_contract_hashes TEXT NOT NULL,
-            created_at TEXT NOT NULL
-        );
-        """
-    )
-
     m_dict = {
         "mode": "compatibility",
         "command": ("pytest", "-q"),
@@ -697,17 +717,9 @@ def test_register_verifier_persists_to_sqlite():
         created_at=datetime(2026, 9, 18, 16, 0, 0, tzinfo=UTC),
     )
 
-    register_verifier(conn, version, manifest)
+    with pytest.raises(
+        NotImplementedError,
+        match="Phase 1 stub: verifier registry persistence is not implemented yet.",
+    ):
+        register_verifier(conn, version, manifest)
 
-    # Verify rows persisted
-    m_row = conn.execute(
-        "SELECT manifest_hash, mode, parser_id FROM verifier_manifests WHERE manifest_hash = ?",
-        (m_hash,),
-    ).fetchone()
-    assert m_row == (m_hash, "compatibility", "pytest-report-v1")
-
-    v_row = conn.execute(
-        "SELECT verifier_key, verifier_id, manifest_hash FROM verifier_versions WHERE verifier_key = ?",
-        ("v-1@1.0.0",),
-    ).fetchone()
-    assert v_row == ("v-1@1.0.0", "v-1", m_hash)
