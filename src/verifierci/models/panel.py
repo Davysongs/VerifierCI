@@ -6,10 +6,11 @@ All domain entities are immutable (@dataclass(frozen=True, slots=True)).
 
 from __future__ import annotations
 
+import hashlib
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
-import hashlib
-from typing import TYPE_CHECKING, Literal, Sequence
+from typing import TYPE_CHECKING, Literal
 
 from verifierci.errors import ValidationError
 from verifierci.models.task import Contract, canonical_bytes
@@ -26,7 +27,9 @@ class PatchCase:
     task_key: str  # Exact task version used for patch application.
     diff_digest: str  # Unified diff bytes, including empty no-op diff.
     base_snapshot_digest: str  # Source against which the diff was authored.
-    source: Literal["human", "agent", "mutation", "reference", "noop"]  # Patch production category.
+    source: Literal[
+        "human", "agent", "mutation", "reference", "noop"
+    ]  # Patch production category.
     source_run_id: str | None  # Optional recorded agent generation run.
     parent_case_ids: tuple[str, ...]  # Direct derivation links to other patches.
     family_id: str  # Implementation/fault lineage group for split control.
@@ -47,10 +50,14 @@ class Witness:
     input_digest: str  # Bounded witness setup/input.
     expected_digest: str  # Reviewed expected behaviour description/data.
     observed_digest: str  # Recorded counterexample result.
-    reproducer_command: tuple[str, ...]  # Sandboxed executable plus argv, never a host shell string.
+    reproducer_command: tuple[
+        str, ...
+    ]  # Sandboxed executable plus argv, never a host shell string.
     environment_id: str  # Environment of witness reproduction.
     reviewed_by: tuple[str, ...]  # Reviewers who accepted the evidence link.
-    reproduced_at: datetime | None  # Last independently reproduced timestamp, null if pending.
+    reproduced_at: (
+        datetime | None
+    )  # Last independently reproduced timestamp, null if pending.
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,12 +68,18 @@ class Adjudication:
     case_id: str  # Reviewed patch case.
     contract_hash: str  # Contract on which the label depends.
     version: int  # Monotonic revision number for this case/contract.
-    label: Literal["valid", "invalid", "unresolved"]  # Independent bounded correctness assessment.
-    review_status: Literal["provisional", "independent", "disputed"]  # Strength and agreement status.
+    label: Literal[
+        "valid", "invalid", "unresolved"
+    ]  # Independent bounded correctness assessment.
+    review_status: Literal[
+        "provisional", "independent", "disputed"
+    ]  # Strength and agreement status.
     votes: tuple[ReviewVote, ...]  # Original reviewer decisions retained verbatim.
     rationale: str  # Requirement-based explanation, not a verifier pass count.
     requirement_hashes: tuple[str, ...]  # Reviewed normative requirements.
-    witness_ids: tuple[str, ...]  # Accepted counterexamples for invalidity or supporting checks.
+    witness_ids: tuple[
+        str, ...
+    ]  # Accepted counterexamples for invalidity or supporting checks.
     uncertainty: str  # Remaining qualifications and disagreements.
     supersedes_id: str | None  # Earlier decision replaced by this revision.
     created_at: datetime  # Decision timestamp.
@@ -82,7 +95,9 @@ class PatchPanel:
     split: Literal["development", "assessment", "train"]  # Permitted purpose.
     membership_digest: str  # Canonical sorted membership and adjudication mapping hash.
     sampling_policy: str  # Selection procedure and exclusions.
-    exposed_at: datetime | None  # Earliest known disclosure to developers/generators or public.
+    exposed_at: (
+        datetime | None
+    )  # Earliest known disclosure to developers/generators or public.
     development_used_at: datetime | None  # First use for verifier selection or tuning.
     sealed_at: datetime | None  # Irreversible cohort freeze time.
     retired_at: datetime | None  # Date assessment stopped supporting unseen claims.
@@ -97,7 +112,9 @@ class PatchPanelMembership:
     case_id: str  # Member patch.
     adjudication_id: str  # Exact decision used by this panel.
     ordinal: int  # Stable display order, excluded from metric meaning.
-    expected_control_outcomes: dict[str, str]  # Verifier-key to expected control observation.
+    expected_control_outcomes: dict[
+        str, str
+    ]  # Verifier-key to expected control observation.
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,7 +134,9 @@ class AgentRun:
     created_at: datetime  # Generation timestamp.
 
 
-def panel_digest(members: tuple[PatchPanelMembership, ...] | Sequence[PatchPanelMembership]) -> str:
+def panel_digest(
+    members: tuple[PatchPanelMembership, ...] | Sequence[PatchPanelMembership],
+) -> str:
     """Compute 64-char lowercase SHA-256 digest of canonical sorted membership records."""
     # Sort members by case_id to ensure deterministic membership identity
     sorted_members = sorted(members, key=lambda m: m.case_id)
@@ -134,7 +153,9 @@ def panel_digest(members: tuple[PatchPanelMembership, ...] | Sequence[PatchPanel
     return hashlib.sha256(canonical_bytes(raw)).hexdigest()
 
 
-def validate_membership(case: PatchCase, review: Adjudication, contract: Contract) -> None:
+def validate_membership(
+    case: PatchCase, review: Adjudication, contract: Contract
+) -> None:
     """Validate that an adjudication matches the given patch case and task contract."""
     if review.case_id != case.case_id:
         raise ValidationError(
@@ -144,7 +165,10 @@ def validate_membership(case: PatchCase, review: Adjudication, contract: Contrac
     if review.contract_hash != contract.contract_hash:
         raise ValidationError(
             f"Adjudication contract_hash '{review.contract_hash}' does not match contract '{contract.contract_hash}'.",
-            details={"adjudication_contract_hash": review.contract_hash, "contract_hash": contract.contract_hash},
+            details={
+                "adjudication_contract_hash": review.contract_hash,
+                "contract_hash": contract.contract_hash,
+            },
         )
     if review.review_status == "disputed" and review.label != "unresolved":
         raise ValidationError(

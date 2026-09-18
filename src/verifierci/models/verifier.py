@@ -39,7 +39,9 @@ class VerifierManifest:
     mode: Literal["compatibility", "blackbox"]  # Declared assurance boundary.
     command: tuple[str, ...]  # Executable and exact argv template.
     build_command: tuple[str, ...]  # Optional build argv, empty when absent.
-    expected_collection: tuple[str, ...]  # Exact required test IDs for this verifier version.
+    expected_collection: tuple[
+        str, ...
+    ]  # Exact required test IDs for this verifier version.
     parser_id: str  # Versioned parser name, such as pytest-report-v1.
     report_path: str  # Allowlisted relative result path under /out.
     payload_digest: str  # Read-only verifier bundle artifact.
@@ -110,10 +112,15 @@ def validate_verifier(version: VerifierVersion, manifest: VerifierManifest) -> N
     if version.manifest_hash != manifest.manifest_hash:
         raise ValidationError(
             f"version.manifest_hash '{version.manifest_hash}' does not match manifest '{manifest.manifest_hash}'.",
-            details={"version_manifest_hash": version.manifest_hash, "manifest_hash": manifest.manifest_hash},
+            details={
+                "version_manifest_hash": version.manifest_hash,
+                "manifest_hash": manifest.manifest_hash,
+            },
         )
     if manifest.timeout_seconds <= 0:
-        raise ValidationError(f"Verifier manifest timeout must be positive, got {manifest.timeout_seconds}.")
+        raise ValidationError(
+            f"Verifier manifest timeout must be positive, got {manifest.timeout_seconds}."
+        )
     if not manifest.command:
         raise ValidationError("Verifier manifest command cannot be empty.")
     if manifest.mode not in ("compatibility", "blackbox"):
@@ -144,7 +151,9 @@ def resolve_command(
                 )
             key = token[1:-1]
             if key not in paths:
-                raise ValidationError(f"Missing required path substitution for placeholder '{token}'.")
+                raise ValidationError(
+                    f"Missing required path substitution for placeholder '{token}'."
+                )
             resolved_argv.append(str(paths[key]))
         else:
             resolved_argv.append(token)

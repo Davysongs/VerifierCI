@@ -6,9 +6,9 @@ All domain entities are immutable (@dataclass(frozen=True, slots=True)).
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from datetime import datetime
-import hashlib
 from typing import TYPE_CHECKING, Literal
 
 from verifierci.errors import ValidationError
@@ -32,10 +32,16 @@ class EvaluationAttempt:
     attempt_id: str  # UUID for this physical attempt.
     job_id: str  # Planned task/case/verifier/repetition identity.
     fence: int  # Lease generation that authorised this attempt.
-    outcome: Literal["accept", "reject", "invalid_evaluation", "error"] | None  # Raw completed observation.
-    evaluation_validity: Literal["pending", "valid", "invalid"]  # Whether usable as a grading decision.
+    outcome: (
+        Literal["accept", "reject", "invalid_evaluation", "error"] | None
+    )  # Raw completed observation.
+    evaluation_validity: Literal[
+        "pending", "valid", "invalid"
+    ]  # Whether usable as a grading decision.
     error_code: str | None  # Typed diagnostic such as PATCH_ERROR or TIMEOUT.
-    disposition: Literal["active", "authoritative", "stale", "abandoned"]  # Authority status.
+    disposition: Literal[
+        "active", "authoritative", "stale", "abandoned"
+    ]  # Authority status.
     started_at: datetime  # Start time of physical execution.
     finished_at: datetime | None  # Completion or abandonment time.
     exit_code: int | None  # Observed verifier process code.
@@ -56,11 +62,15 @@ def validate_attempt(attempt: EvaluationAttempt) -> None:
     flaky is an aggregate-cell outcome, not an attempt outcome.
     """
     if attempt.fence <= 0:
-        raise ValidationError(f"Evaluation attempt fence must be positive, got {attempt.fence}.")
+        raise ValidationError(
+            f"Evaluation attempt fence must be positive, got {attempt.fence}."
+        )
 
     # flaky is prohibited on an individual attempt
     if getattr(attempt, "outcome", None) == "flaky":
-        raise ValidationError("Individual attempts cannot have outcome 'flaky'; flaky is an aggregate-cell outcome.")
+        raise ValidationError(
+            "Individual attempts cannot have outcome 'flaky'; flaky is an aggregate-cell outcome."
+        )
 
     if attempt.evaluation_validity == "pending":
         if attempt.outcome is not None or attempt.disposition != "active":
@@ -74,9 +84,8 @@ def validate_attempt(attempt: EvaluationAttempt) -> None:
                 f"Valid evaluation attempt must have outcome 'accept' or 'reject', got '{attempt.outcome}'."
             )
     elif attempt.evaluation_validity == "invalid":
-        valid_invalid = (
-            attempt.outcome in ("invalid_evaluation", "error")
-            or (attempt.outcome is None and attempt.disposition in ("abandoned", "stale"))
+        valid_invalid = attempt.outcome in ("invalid_evaluation", "error") or (
+            attempt.outcome is None and attempt.disposition in ("abandoned", "stale")
         )
         if not valid_invalid:
             raise ValidationError(
@@ -85,7 +94,9 @@ def validate_attempt(attempt: EvaluationAttempt) -> None:
                 f"disposition={attempt.disposition}."
             )
     else:
-        raise ValidationError(f"Unknown evaluation_validity: {attempt.evaluation_validity}")
+        raise ValidationError(
+            f"Unknown evaluation_validity: {attempt.evaluation_validity}"
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,7 +108,9 @@ class AcceptanceMatrix:
     reducer_version: str  # Version of selection and repetition aggregation rules.
     cells: tuple[AcceptanceCell, ...]  # One entry per task/case/verifier.
     complete: bool  # True only when all planned jobs are terminal.
-    source_attempts_digest: str  # Identity of selected and excluded attempt dispositions.
+    source_attempts_digest: (
+        str  # Identity of selected and excluded attempt dispositions.
+    )
     created_at: datetime  # Finalisation timestamp.
 
 
@@ -122,7 +135,9 @@ class MetricResult:
     value: float | None  # Computed rate/delta or null if undefined.
     numerator: int | None  # Single-task count; null for a macro-average.
     denominator: int | None  # Single-task denominator; null for macro-average.
-    task_terms: tuple[MetricTerm, ...]  # Per-task counts and exclusions supporting the result.
+    task_terms: tuple[
+        MetricTerm, ...
+    ]  # Per-task counts and exclusions supporting the result.
     ci_low: float | None  # Lower interval endpoint, null when not estimable.
     ci_high: float | None  # Upper interval endpoint, null when not estimable.
     analysis_plan_hash: str | None  # Plan controlling inference and multiplicity.
@@ -137,11 +152,21 @@ class GateDecision:
     run_id: str  # Audit being evaluated.
     matrix_id: str | None  # Null only for pre-execution infrastructure failure.
     policy_hash: str  # Exact release policy used.
-    state: Literal["PASSED", "BLOCKED", "INCONCLUSIVE", "INSUFFICIENT_EVIDENCE", "INFRASTRUCTURE_ERROR"]
+    state: Literal[
+        "PASSED",
+        "BLOCKED",
+        "INCONCLUSIVE",
+        "INSUFFICIENT_EVIDENCE",
+        "INFRASTRUCTURE_ERROR",
+    ]
     exit_code: int  # Canonical CLI exit category.
     reasons: tuple[str, ...]  # Ordered rule identifiers and explanations.
-    evidence: tuple[GateEvidence, ...]  # Cases, witnesses and paired observations backing the decision.
-    reliability_flags: tuple[str, ...]  # Additional warnings retained even when BLOCKED.
+    evidence: tuple[
+        GateEvidence, ...
+    ]  # Cases, witnesses and paired observations backing the decision.
+    reliability_flags: tuple[
+        str, ...
+    ]  # Additional warnings retained even when BLOCKED.
     created_at: datetime  # Decision evaluation timestamp.
 
 
@@ -154,8 +179,12 @@ class Artifact:
     size_bytes: int  # Exact retained byte count.
     storage_uri: str  # Content-addressed local path or approved remote locator.
     media_type: str  # Validated content type, never trusted from filename alone.
-    access_policy: Literal["public", "restricted", "sealed"]  # Disclosure boundary for this artifact.
-    retention_until: datetime | None  # Earliest permitted deletion time, null for retained evidence.
+    access_policy: Literal[
+        "public", "restricted", "sealed"
+    ]  # Disclosure boundary for this artifact.
+    retention_until: (
+        datetime | None
+    )  # Earliest permitted deletion time, null for retained evidence.
     available: bool  # Whether bytes are presently retrievable.
     created_at: datetime  # First successful registration.
 
@@ -167,7 +196,9 @@ class AuditManifest:
     manifest_hash: str  # Canonical manifest hash excluding this field only.
     run_id: str  # UUID fixed for retries and resume.
     benchmark_version: str  # Frozen task membership release identity.
-    task_pins: tuple[TaskPin, ...]  # Per-task contract, snapshot, environment and verifier pair.
+    task_pins: tuple[
+        TaskPin, ...
+    ]  # Per-task contract, snapshot, environment and verifier pair.
     panel_key: str  # Exact panel version.
     adjudication_version: str  # Digest of sorted case-to-decision mapping.
     evaluation_harness_version: str  # Controller and upstream harness lock identity.
@@ -175,10 +206,18 @@ class AuditManifest:
     policy_hash: str  # Frozen release gate policy.
     analysis_plan_hash: str | None  # Pre-registration required for unseen assessment.
     timestamp: datetime  # Run plan creation time.
-    host_fingerprint: str  # Kernel, architecture, runtime and cgroup capability identity.
-    seed: int | None  # Controlled randomness seed, null with explicit deterministic policy.
-    agent_version: str | None  # Optional generator cohort identifier; per-case details in AgentRun.
-    model_identifier: str | None  # Optional generator snapshot; null for saved mixed-source patches.
+    host_fingerprint: (
+        str  # Kernel, architecture, runtime and cgroup capability identity.
+    )
+    seed: (
+        int | None
+    )  # Controlled randomness seed, null with explicit deterministic policy.
+    agent_version: (
+        str | None
+    )  # Optional generator cohort identifier; per-case details in AgentRun.
+    model_identifier: (
+        str | None
+    )  # Optional generator snapshot; null for saved mixed-source patches.
     max_repetitions: int  # Planned repetitions per cell, normally three.
     max_attempts_per_job: int  # Bounded infrastructure retry allowance.
     timeout_seconds: int  # Maximum allowed wall limit, including build.
@@ -193,7 +232,9 @@ class AuditRun:
 
     run_id: str  # Audit UUID.
     manifest_hash: str  # Frozen audit configuration.
-    state: Literal["PLANNED", "RUNNING", "COMPLETE", "CANCELLED", "FAILED"]  # Operational run lifecycle.
+    state: Literal[
+        "PLANNED", "RUNNING", "COMPLETE", "CANCELLED", "FAILED"
+    ]  # Operational run lifecycle.
     cancel_requested: bool  # Cooperative cancellation intent.
     created_at: datetime  # Registration time.
     finished_at: datetime | None  # Terminal timestamp.

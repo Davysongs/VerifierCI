@@ -34,7 +34,9 @@ def test_error_attributes_and_defaults():
 
 
 def test_error_custom_code():
-    err = VerifierCIError("Custom diagnostic", code="PATCH_ERROR", details={"diff": "invalid"})
+    err = VerifierCIError(
+        "Custom diagnostic", code="PATCH_ERROR", details={"diff": "invalid"}
+    )
     assert err.code == "PATCH_ERROR"
     assert err.details == {"diff": "invalid"}
 

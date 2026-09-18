@@ -8,15 +8,16 @@ and RFC 3339 UTC timestamps.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, fields, is_dataclass
-from datetime import datetime, timezone
 import hashlib
 import json
 import math
 import re
+from dataclasses import dataclass, fields, is_dataclass
+from datetime import UTC, datetime
 from typing import Any, Literal
 
-from packaging.version import InvalidVersion, parse as parse_version
+from packaging.version import InvalidVersion
+from packaging.version import parse as parse_version
 
 from verifierci.errors import ValidationError
 
@@ -33,12 +34,14 @@ def canonical_repr(value: Any) -> Any:
         return value
     if isinstance(value, float):
         if math.isnan(value) or math.isinf(value):
-            raise ValidationError("Non-finite float values are prohibited in canonical JSON.")
+            raise ValidationError(
+                "Non-finite float values are prohibited in canonical JSON."
+            )
         return value
     if isinstance(value, datetime):
         if value.tzinfo is None:
             raise ValidationError("Datetime must be timezone-aware.")
-        utc_dt = value.astimezone(timezone.utc)
+        utc_dt = value.astimezone(UTC)
         return utc_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
     if is_dataclass(value):
         res: dict[str, Any] = {}
@@ -49,7 +52,9 @@ def canonical_repr(value: Any) -> Any:
         return {str(k): canonical_repr(v) for k, v in value.items()}
     if isinstance(value, (list, tuple)):
         return [canonical_repr(v) for v in value]
-    raise ValidationError(f"Object of type {type(value).__name__} is not canonically serializable.")
+    raise ValidationError(
+        f"Object of type {type(value).__name__} is not canonically serializable."
+    )
 
 
 def canonical_bytes(value: object) -> bytes:
@@ -74,8 +79,12 @@ class Requirement:
     requirement_hash: str  # Digest of canonical requirement content.
     requirement_id: str  # Stable identifier within the task contract.
     text: str  # Behaviour an implementation must satisfy.
-    source_kind: Literal["explicit", "repository", "clarification"]  # Legitimate source category.
-    evidence_digests: tuple[str, ...]  # Immutable source excerpts supporting this requirement.
+    source_kind: Literal[
+        "explicit", "repository", "clarification"
+    ]  # Legitimate source category.
+    evidence_digests: tuple[
+        str, ...
+    ]  # Immutable source excerpts supporting this requirement.
     source_locator: str  # Issue text, repository path/commit or approved clarification.
     allowed_variation: str  # Implementation freedoms relevant to this requirement.
 
@@ -116,7 +125,9 @@ class Contract:
     version: str  # Contract semantic version.
     requirement_hashes: tuple[str, ...]  # Sorted requirement content references.
     allowed_variation: str  # Contract-wide implementation freedom.
-    unresolved_questions: tuple[str, ...]  # Ambiguities that prevent eligibility when material.
+    unresolved_questions: tuple[
+        str, ...
+    ]  # Ambiguities that prevent eligibility when material.
     evidence_digests: tuple[str, ...]  # Supporting immutable source evidence.
     created_at: datetime  # Registry creation timestamp.
 
@@ -168,7 +179,9 @@ class Environment:
     """Immutable execution environment manifest."""
 
     environment_id: str  # Immutable environment manifest digest.
-    backend: Literal["fixture", "docker"]  # Reviewed fixture subprocess or constrained Docker.
+    backend: Literal[
+        "fixture", "docker"
+    ]  # Reviewed fixture subprocess or constrained Docker.
     image_digest: str | None  # OCI repository@sha256 reference, required for Docker.
     platform: str  # Pinned OS/architecture, for example linux/amd64.
     recipe_digest: str  # Immutable build recipe identity.
@@ -193,7 +206,9 @@ class Task:
     environment_id: str  # Frozen execution environment.
     licence: str  # SPDX expression or NOASSERTION pending review.
     provenance: str  # Source URL or dataset revision and instance locator.
-    eligibility: Literal["eligible", "excluded", "pending"]  # Admission state for this version.
+    eligibility: Literal[
+        "eligible", "excluded", "pending"
+    ]  # Admission state for this version.
     notes: str  # Exclusion reasons and unresolved import context.
     created_at: datetime  # UTC creation time, serialised as RFC 3339.
 
@@ -210,7 +225,9 @@ def compare_versions(left: str, right: str) -> int:
         vl = parse_version(left)
         vr = parse_version(right)
     except InvalidVersion as exc:
-        raise ValidationError(f"Invalid version comparison '{left}' vs '{right}': {exc}") from exc
+        raise ValidationError(
+            f"Invalid version comparison '{left}' vs '{right}': {exc}"
+        ) from exc
 
     if vl < vr:
         return -1
@@ -235,7 +252,10 @@ def validate_task(task: Task, contract: Contract) -> None:
     if task.contract_hash != contract.contract_hash:
         raise ValidationError(
             f"task.contract_hash '{task.contract_hash}' does not match contract.contract_hash '{contract.contract_hash}'.",
-            details={"task_contract_hash": task.contract_hash, "contract_hash": contract.contract_hash},
+            details={
+                "task_contract_hash": task.contract_hash,
+                "contract_hash": contract.contract_hash,
+            },
         )
     if not _is_hex_64(task.contract_hash):
         raise ValidationError(

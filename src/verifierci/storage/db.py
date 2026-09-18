@@ -11,6 +11,7 @@ Immutable content rows reject UPDATE/DELETE through generated triggers.
 Operational tables (audit_runs, jobs, active attempts, artifact
 locations/availability) have narrow, documented mutations.
 """
+
 from __future__ import annotations
 
 
@@ -22,4 +23,3 @@ class Database:
     Claim expiry records an abandoned attempt and requeues only eligible jobs.
     The controller is the sole database writer service.
     """
-

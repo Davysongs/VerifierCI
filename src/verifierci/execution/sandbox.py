@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
+from typing import Self
 
 
 @dataclass
@@ -12,7 +13,7 @@ class DummySandbox(AbstractContextManager["DummySandbox"]):
 
     task_id: str
 
-    def __enter__(self) -> "DummySandbox":
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, *exc) -> None:

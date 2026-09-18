@@ -5,6 +5,7 @@ coverage and paired changes.  Zero denominators return None (null), not zero.
 
 gate.py arrives in Phase 3.
 """
+
 from __future__ import annotations
 
 
@@ -32,4 +33,3 @@ def valid_rejection_rate(
     if total_valid == 0:
         return None
     return rejected / total_valid
-

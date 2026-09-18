@@ -3,6 +3,7 @@
 Emits internal structured events for observability.  Events are bounded in
 size; no model keys, raw trajectories or complete container stdout are emitted.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -15,9 +16,7 @@ class TelemetryEvent:
     """An immutable structured telemetry event."""
 
     name: str
-    timestamp: datetime = field(
-        default_factory=lambda: datetime.now(UTC)
-    )
+    timestamp: datetime = field(default_factory=lambda: datetime.now(UTC))
     payload: dict[str, Any] = field(default_factory=dict)
 
 
@@ -27,4 +26,3 @@ class EventWriter:
     Emits TelemetryEvents to a configured sink.  Sensitive fields are
     excluded before emission.
     """
-
