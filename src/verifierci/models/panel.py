@@ -1,4 +1,3 @@
-"""Patch panel models."""
 """Patch panel, case, witness, adjudication, and membership domain models.
 
 SDD Section 4.1, 4.4, and Section 5.
@@ -7,17 +6,15 @@ All domain entities are immutable (@dataclass(frozen=True, slots=True)).
 
 from __future__ import annotations
 
-import hashlib
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Sequence
 from datetime import datetime
+import hashlib
 from typing import TYPE_CHECKING, Literal
 
 from verifierci.errors import ValidationError
 from verifierci.models.task import Contract, canonical_bytes
 
-@dataclass(frozen=True)
 if TYPE_CHECKING:
     from verifierci.models.protocol import ReviewVote
 
@@ -30,9 +27,7 @@ class PatchCase:
     task_key: str  # Exact task version used for patch application.
     diff_digest: str  # Unified diff bytes, including empty no-op diff.
     base_snapshot_digest: str  # Source against which the diff was authored.
-    source: Literal[
-        "human", "agent", "mutation", "reference", "noop"
-    ]  # Patch production category.
+    source: Literal["human", "agent", "mutation", "reference", "noop"]  # Patch production category.
     source_run_id: str | None  # Optional recorded agent generation run.
     parent_case_ids: tuple[str, ...]  # Direct derivation links to other patches.
     family_id: str  # Implementation/fault lineage group for split control.
@@ -53,14 +48,10 @@ class Witness:
     input_digest: str  # Bounded witness setup/input.
     expected_digest: str  # Reviewed expected behaviour description/data.
     observed_digest: str  # Recorded counterexample result.
-    reproducer_command: tuple[
-        str, ...
-    ]  # Sandboxed executable plus argv, never a host shell string.
+    reproducer_command: tuple[str, ...]  # Sandboxed executable plus argv, never a host shell string.
     environment_id: str  # Environment of witness reproduction.
     reviewed_by: tuple[str, ...]  # Reviewers who accepted the evidence link.
-    reproduced_at: (
-        datetime | None
-    )  # Last independently reproduced timestamp, null if pending.
+    reproduced_at: datetime | None  # Last independently reproduced timestamp, null if pending.
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,18 +62,12 @@ class Adjudication:
     case_id: str  # Reviewed patch case.
     contract_hash: str  # Contract on which the label depends.
     version: int  # Monotonic revision number for this case/contract.
-    label: Literal[
-        "valid", "invalid", "unresolved"
-    ]  # Independent bounded correctness assessment.
-    review_status: Literal[
-        "provisional", "independent", "disputed"
-    ]  # Strength and agreement status.
+    label: Literal["valid", "invalid", "unresolved"]  # Independent bounded correctness assessment.
+    review_status: Literal["provisional", "independent", "disputed"]  # Strength and agreement status.
     votes: tuple[ReviewVote, ...]  # Original reviewer decisions retained verbatim.
     rationale: str  # Requirement-based explanation, not a verifier pass count.
     requirement_hashes: tuple[str, ...]  # Reviewed normative requirements.
-    witness_ids: tuple[
-        str, ...
-    ]  # Accepted counterexamples for invalidity or supporting checks.
+    witness_ids: tuple[str, ...]  # Accepted counterexamples for invalidity or supporting checks.
     uncertainty: str  # Remaining qualifications and disagreements.
     supersedes_id: str | None  # Earlier decision replaced by this revision.
     created_at: datetime  # Decision timestamp.
@@ -90,37 +75,20 @@ class Adjudication:
 
 @dataclass(frozen=True, slots=True)
 class PatchPanel:
-    """A reviewed set of candidate patch outcomes for a task."""
     """Sealed or development cohort of patch cases for auditing verifiers."""
 
-    task_id: str
-    approved_alternatives: tuple[str, ...]
-    known_bad_patches: tuple[str, ...] = ()
     panel_key: str  # Stable panel_id plus version.
     panel_id: str  # Cohort identifier.
     version: str  # Immutable panel version.
     split: Literal["development", "assessment", "train"]  # Permitted purpose.
     membership_digest: str  # Canonical sorted membership and adjudication mapping hash.
     sampling_policy: str  # Selection procedure and exclusions.
-    exposed_at: (
-        datetime | None
-    )  # Earliest known disclosure to developers/generators or public.
+    exposed_at: datetime | None  # Earliest known disclosure to developers/generators or public.
     development_used_at: datetime | None  # First use for verifier selection or tuning.
     sealed_at: datetime | None  # Irreversible cohort freeze time.
     retired_at: datetime | None  # Date assessment stopped supporting unseen claims.
     parent_panel_key: str | None  # Previous panel version or promotion source.
 
-    @classmethod
-    def from_sequences(
-        cls,
-        task_id: str,
-        approved_alternatives: Sequence[str],
-        known_bad_patches: Sequence[str] | None = None,
-    ) -> "PatchPanel":
-        return cls(
-            task_id=task_id,
-            approved_alternatives=tuple(approved_alternatives),
-            known_bad_patches=tuple(known_bad_patches or ()),
 
 @dataclass(frozen=True, slots=True)
 class PatchPanelMembership:
@@ -130,9 +98,7 @@ class PatchPanelMembership:
     case_id: str  # Member patch.
     adjudication_id: str  # Exact decision used by this panel.
     ordinal: int  # Stable display order, excluded from metric meaning.
-    expected_control_outcomes: dict[
-        str, str
-    ]  # Verifier-key to expected control observation.
+    expected_control_outcomes: dict[str, str]  # Verifier-key to expected control observation.
 
 
 @dataclass(frozen=True, slots=True)
