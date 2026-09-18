@@ -6,11 +6,11 @@ All domain entities are immutable (@dataclass(frozen=True, slots=True)).
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime
 import hashlib
 import re
 import sqlite3
+from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Literal
 
 from verifierci.errors import ValidationError
@@ -166,4 +166,3 @@ def register_verifier(
 ) -> None:
     """Store manifest and version records in the database."""
     # Transactional registry insert implementation
-    pass
