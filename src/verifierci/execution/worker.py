@@ -11,6 +11,7 @@ Responsibilities:
 - After lease loss: terminate execution and submit only stale diagnostic
   evidence, never an authoritative result.
 """
+
 from __future__ import annotations
 
 
@@ -20,4 +21,3 @@ class Worker:
     Claims one job, executes it inside the declared sandbox, collects
     bounded artifacts and commits the attempt result through the lease fence.
     """
-

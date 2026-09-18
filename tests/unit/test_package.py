@@ -5,7 +5,7 @@ from verifierci.cli import build_parser, main
 
 
 def test_version_is_set():
-    assert __version__ == "0.0.0"
+    assert __version__ == "0.1.0"
 
 
 def test_parser_has_version_flag():

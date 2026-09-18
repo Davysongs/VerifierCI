@@ -16,7 +16,9 @@ def build_parser() -> argparse.ArgumentParser:
         prog="verifierci",
         description="VerifierCI command line scaffold",
     )
-    parser.add_argument("--version", action="version", version=f"verifierci {__version__}")
+    parser.add_argument(
+        "--version", action="version", version=f"verifierci {__version__}"
+    )
     return parser
 
 
