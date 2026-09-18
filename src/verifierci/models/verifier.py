@@ -1,3 +1,4 @@
+"""Verifier configuration model."""
 """Verifier version and manifest domain models.
 
 SDD Section 4.1 and Section 5.
@@ -10,15 +11,22 @@ import hashlib
 import re
 import sqlite3
 from dataclasses import dataclass
+from typing import Any
 from datetime import datetime
 from typing import Any, Literal
 
 from verifierci.errors import ValidationError
 from verifierci.models.task import canonical_bytes
 
+@dataclass(frozen=True)
+class VerifierConfig:
+    """Lightweight configuration for a verifier implementation."""
 _PLACEHOLDER_PATTERN = re.compile(r"\{[^{}]*\}")
 _ALLOWED_PLACEHOLDERS = {"{workspace}", "{verifier}", "{out}", "{seed}"}
 
+    name: str
+    version: str
+    settings: dict[str, Any]
 
 @dataclass(frozen=True, slots=True)
 class CommandSpec:

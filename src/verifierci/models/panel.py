@@ -1,3 +1,4 @@
+"""Patch panel models."""
 """Patch panel, case, witness, adjudication, and membership domain models.
 
 SDD Section 4.1, 4.4, and Section 5.
@@ -9,12 +10,14 @@ from __future__ import annotations
 import hashlib
 from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import Sequence
 from datetime import datetime
 from typing import TYPE_CHECKING, Literal
 
 from verifierci.errors import ValidationError
 from verifierci.models.task import Contract, canonical_bytes
 
+@dataclass(frozen=True)
 if TYPE_CHECKING:
     from verifierci.models.protocol import ReviewVote
 
@@ -87,8 +90,12 @@ class Adjudication:
 
 @dataclass(frozen=True, slots=True)
 class PatchPanel:
+    """A reviewed set of candidate patch outcomes for a task."""
     """Sealed or development cohort of patch cases for auditing verifiers."""
 
+    task_id: str
+    approved_alternatives: tuple[str, ...]
+    known_bad_patches: tuple[str, ...] = ()
     panel_key: str  # Stable panel_id plus version.
     panel_id: str  # Cohort identifier.
     version: str  # Immutable panel version.
@@ -103,6 +110,17 @@ class PatchPanel:
     retired_at: datetime | None  # Date assessment stopped supporting unseen claims.
     parent_panel_key: str | None  # Previous panel version or promotion source.
 
+    @classmethod
+    def from_sequences(
+        cls,
+        task_id: str,
+        approved_alternatives: Sequence[str],
+        known_bad_patches: Sequence[str] | None = None,
+    ) -> "PatchPanel":
+        return cls(
+            task_id=task_id,
+            approved_alternatives=tuple(approved_alternatives),
+            known_bad_patches=tuple(known_bad_patches or ()),
 
 @dataclass(frozen=True, slots=True)
 class PatchPanelMembership:

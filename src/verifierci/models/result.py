@@ -1,3 +1,4 @@
+"""Verification result model."""
 """Result, attempt, matrix, metric, decision, and artifact domain models.
 
 SDD Section 4.1 and Section 5.
@@ -8,12 +9,16 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
+from typing import Any
 from datetime import datetime
 from typing import TYPE_CHECKING, Literal
 
 from verifierci.errors import ValidationError
 from verifierci.models.task import canonical_bytes
 
+@dataclass(frozen=True)
+class VerificationResult:
+    """Outcome of running one verifier against a patch candidate."""
 if TYPE_CHECKING:
     from verifierci.models.protocol import (
         AcceptanceCell,
@@ -24,6 +29,9 @@ if TYPE_CHECKING:
         TaskPin,
     )
 
+    task_id: str
+    verdict: str
+    details: dict[str, Any] | None = None
 
 @dataclass(frozen=True, slots=True)
 class EvaluationAttempt:

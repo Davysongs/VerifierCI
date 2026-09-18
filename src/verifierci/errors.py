@@ -109,3 +109,4 @@ def exit_category(exc: VerifierCIError | Exception) -> int:
     if isinstance(exc, VerifierCIError):
         return 3
     return 3
+

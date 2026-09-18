@@ -13,6 +13,7 @@ class DummySandbox(AbstractContextManager["DummySandbox"]):
 
     task_id: str
 
+    def __enter__(self) -> DummySandbox:
     def __enter__(self) -> Self:
         return self
 

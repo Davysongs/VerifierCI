@@ -1,3 +1,4 @@
+"""Core task model."""
 """Task, requirement, contract, snapshot, and environment domain models.
 
 SDD Section 4.1, 4.4, and Section 5.
@@ -8,6 +9,7 @@ and RFC 3339 UTC timestamps.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import hashlib
 import json
 import math
@@ -19,6 +21,7 @@ from typing import Any, Literal
 from packaging.version import InvalidVersion
 from packaging.version import parse as parse_version
 
+@dataclass(frozen=True)
 from verifierci.errors import ValidationError
 
 _HEX_64_PATTERN = re.compile(r"^[0-9a-f]{64}$")
@@ -194,8 +197,12 @@ class Environment:
 
 @dataclass(frozen=True, slots=True)
 class Task:
+    """A minimal verifier task record used by adapters and execution layers."""
     """Frozen task specification and execution references."""
 
+    id: str
+    title: str
+    prompt: str
     task_key: str  # Immutable task_id@version key.
     task_id: str  # Stable logical task identifier.
     version: str  # Semantic task version.
