@@ -33,15 +33,19 @@ from verifierci.models import (
 )
 
 
-def _sample_requirement(req_id: str = "REQ-1", text: str = "Must return 0") -> Requirement:
-    r_hash = requirement_hash({
-        "requirement_id": req_id,
-        "text": text,
-        "source_kind": "explicit",
-        "evidence_digests": ("a" * 64,),
-        "source_locator": "line 10",
-        "allowed_variation": "none",
-    })
+def _sample_requirement(
+    req_id: str = "REQ-1", text: str = "Must return 0"
+) -> Requirement:
+    r_hash = requirement_hash(
+        {
+            "requirement_id": req_id,
+            "text": text,
+            "source_kind": "explicit",
+            "evidence_digests": ("a" * 64,),
+            "source_locator": "line 10",
+            "allowed_variation": "none",
+        }
+    )
     return Requirement(
         requirement_hash=r_hash,
         requirement_id=req_id,
@@ -54,14 +58,16 @@ def _sample_requirement(req_id: str = "REQ-1", text: str = "Must return 0") -> R
 
 
 def _sample_contract(req_hashes: tuple[str, ...] = ()) -> Contract:
-    c_hash = contract_hash({
-        "task_id": "task-1",
-        "version": "1.0.0",
-        "requirement_hashes": req_hashes,
-        "allowed_variation": "standard",
-        "unresolved_questions": (),
-        "evidence_digests": ("b" * 64,),
-    })
+    c_hash = contract_hash(
+        {
+            "task_id": "task-1",
+            "version": "1.0.0",
+            "requirement_hashes": req_hashes,
+            "allowed_variation": "standard",
+            "unresolved_questions": (),
+            "evidence_digests": ("b" * 64,),
+        }
+    )
     return Contract(
         contract_hash=c_hash,
         task_id="task-1",
@@ -145,7 +151,9 @@ def test_requirement_hash_alters_on_any_field():
     ]:
         modified = dict(base)
         modified[key] = new_val
-        assert requirement_hash(modified) != base_hash, f"Hash did not change when altering {key}"
+        assert requirement_hash(modified) != base_hash, (
+            f"Hash did not change when altering {key}"
+        )
 
 
 def test_contract_hash_changes_on_requirement_change():
@@ -222,7 +230,14 @@ def test_resolve_command_placeholders():
         "seed": "42",
     }
     cmd = resolve_command(template, paths)
-    assert cmd.argv == ("pytest", "/tmp/work", "--output", "/tmp/work/out.json", "--seed", "42")
+    assert cmd.argv == (
+        "pytest",
+        "/tmp/work",
+        "--output",
+        "/tmp/work/out.json",
+        "--seed",
+        "42",
+    )
 
     # Partial substitution is strictly prohibited
     bad_template = ("pytest", "--workspace={workspace}")

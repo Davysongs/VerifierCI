@@ -5,8 +5,6 @@ SDD Section 5 & Section 6.1 exit categories.
 
 from __future__ import annotations
 
-import pytest
-
 from verifierci.errors import (
     ErrorCode,
     IdentityConflict,
@@ -36,7 +34,9 @@ def test_error_attributes_and_defaults():
 
 
 def test_error_custom_code():
-    err = VerifierCIError("Custom diagnostic", code="PATCH_ERROR", details={"diff": "invalid"})
+    err = VerifierCIError(
+        "Custom diagnostic", code="PATCH_ERROR", details={"diff": "invalid"}
+    )
     assert err.code == "PATCH_ERROR"
     assert err.details == {"diff": "invalid"}
 
@@ -54,4 +54,3 @@ def test_exit_categories():
     assert exit_category(LeaseLost("Lease expired")) == 3
     assert exit_category(VerifierCIError("Generic failure")) == 3
     assert exit_category(RuntimeError("Unexpected Python error")) == 3
-

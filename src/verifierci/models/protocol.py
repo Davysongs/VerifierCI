@@ -7,9 +7,9 @@ or schema-validated TypedDicts. No pickle or dynamic code execution is permitted
 
 from __future__ import annotations
 
-from dataclasses import dataclass, fields, is_dataclass
-from datetime import datetime, timezone
 import json
+from dataclasses import dataclass, fields, is_dataclass
+from datetime import UTC, datetime
 from typing import Any, Literal, TypedDict, get_type_hints
 
 from verifierci.errors import ValidationError
@@ -55,12 +55,16 @@ class TaskPin:
     contract_hash: str  # Normative contract identity.
     repository_snapshot_digest: str  # Source bytes used for all cases of this task.
     environment_id: str  # Immutable environment manifest identity.
-    environment_image_digest: str | None  # OCI digest, null for synthetic fixtures only.
+    environment_image_digest: (
+        str | None
+    )  # OCI digest, null for synthetic fixtures only.
     verifier_baseline_version: str  # Exact baseline verifier key.
     verifier_candidate_version: str  # Exact proposed verifier key.
     baseline_manifest_hash: str  # Baseline argv, tests and parser identity.
     candidate_manifest_hash: str  # Candidate argv, tests and parser identity.
-    case_ids: tuple[str, ...]  # Cases joined to this task, never a global cross-product.
+    case_ids: tuple[
+        str, ...
+    ]  # Cases joined to this task, never a global cross-product.
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,14 +91,18 @@ class Job:
     case_id: str  # Patch case executed by this job.
     verifier_key: str  # Frozen verifier version.
     repetition: int  # Zero-based planned repetition index.
-    state: Literal["PENDING", "CLAIMED", "RUNNING", "DONE", "FAILED", "ABANDONED"]  # Operational state.
+    state: Literal[
+        "PENDING", "CLAIMED", "RUNNING", "DONE", "FAILED", "ABANDONED"
+    ]  # Operational state.
     fence: int  # Monotonically increasing claim generation.
     attempt_id: str | None  # Current physical attempt UUID.
     lease_token: str | None  # Private random fencing secret, omitted from reports.
     worker_id: str | None  # Current worker identity.
     lease_expires_ms: int | None  # Controller UTC epoch deadline in milliseconds.
     attempts_started: int  # Physical attempts already consumed for this job.
-    selected_attempt_id: str | None  # Authoritative terminal result, regardless of pass/fail.
+    selected_attempt_id: (
+        str | None
+    )  # Authoritative terminal result, regardless of pass/fail.
     terminal_reason: str | None  # Failure, cancellation or exhaustion diagnostic.
 
 
@@ -108,13 +116,25 @@ class AcceptanceCell:
     verifier_key: str  # Verifier represented by this row.
     adjudication_id: str  # Decision selected before execution.
     label: Literal["valid", "invalid", "unresolved"]  # Frozen adjudicated label.
-    role: Literal["challenge", "reference", "noop"]  # Whether it belongs in primary rates.
-    outcome: Literal["accept", "reject", "invalid_evaluation", "flaky", "error"]  # Aggregated observation.
-    evaluation_validity: Literal["valid", "invalid"]  # Hard-rate denominator eligibility.
+    role: Literal[
+        "challenge", "reference", "noop"
+    ]  # Whether it belongs in primary rates.
+    outcome: Literal[
+        "accept", "reject", "invalid_evaluation", "flaky", "error"
+    ]  # Aggregated observation.
+    evaluation_validity: Literal[
+        "valid", "invalid"
+    ]  # Hard-rate denominator eligibility.
     planned_repetitions: int  # Required number from the manifest.
-    selected_attempt_ids: tuple[str, ...]  # One terminal selection per repetition where available.
-    excluded_attempt_ids: tuple[str, ...]  # Abandoned, stale and failed infrastructure retries.
-    repetition_outcomes: tuple[str, ...]  # All planned repetition states in fixed order.
+    selected_attempt_ids: tuple[
+        str, ...
+    ]  # One terminal selection per repetition where available.
+    excluded_attempt_ids: tuple[
+        str, ...
+    ]  # Abandoned, stale and failed infrastructure retries.
+    repetition_outcomes: tuple[
+        str, ...
+    ]  # All planned repetition states in fixed order.
     diagnostic_codes: tuple[str, ...]  # Reasons the cell was unusable or unstable.
 
 
@@ -125,7 +145,9 @@ class MetricTerm:
     task_key: str  # Task receiving one macro-average weight.
     numerator: int  # Eligible errors of the requested kind.
     denominator: int  # Eligible cases for this task and label.
-    excluded: dict[str, int]  # Counts by unresolved, control, flaky or execution reason.
+    excluded: dict[
+        str, int
+    ]  # Counts by unresolved, control, flaky or execution reason.
 
 
 @dataclass(frozen=True, slots=True)
@@ -151,7 +173,9 @@ class ImportRequest:
     instance: str  # Exact source instance identifier.
     source: str  # Local manifest, pinned JSONL or frozen task directory.
     source_revision: str  # Dataset or repository revision identity.
-    environment_manifest: str | None  # Required resolved harness metadata for SWE-bench.
+    environment_manifest: (
+        str | None
+    )  # Required resolved harness metadata for SWE-bench.
     output_dir: str  # Destination for normalised manifests.
     dry_run: bool  # Validate without registry or output mutation.
 
@@ -167,7 +191,9 @@ class ImportBundle:
     environment: Environment  # Execution environment identity.
     verifier: VerifierVersion  # Imported original grading logic.
     verifier_manifest: VerifierManifest  # Exact invocation and collection policy.
-    controls: tuple[PatchCase, ...]  # Reference and no-op inputs without inferred labels.
+    controls: tuple[
+        PatchCase, ...
+    ]  # Reference and no-op inputs without inferred labels.
     upstream_artifact: Artifact  # Preserved raw source record.
     diagnostics: tuple[str, ...]  # Nonfatal eligibility notes and unsupported features.
 
@@ -213,7 +239,9 @@ class GatePolicy:
     """Configurable thresholds for CI release gating."""
 
     policy_hash: str  # Hash of the frozen full policy.
-    scope: Literal["diagnostic", "panel_release", "research"]  # Strength of allowed conclusion.
+    scope: Literal[
+        "diagnostic", "panel_release", "research"
+    ]  # Strength of allowed conclusion.
     max_flaky_rate: float  # Default 0.0 for strict release.
     max_invalid_evaluation_rate: float  # Default 0.0 for strict release.
     max_error_rate: float  # Default 0.0 for strict release.
@@ -226,7 +254,9 @@ class GatePolicy:
     max_vrr_increase: float  # Default 0.0 on paired support.
     require_independent_review: bool  # True outside synthetic/provisional diagnostics.
     require_no_new_invalid_acceptance: bool  # True for initial release policy.
-    require_controls_match: bool  # True; anomalous controls need an explanation/new policy.
+    require_controls_match: (
+        bool  # True; anomalous controls need an explanation/new policy.
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -254,7 +284,9 @@ class TestResult:
     """Result of executing an individual collected test item."""
 
     test_id: str  # Canonical node ID including parameter identity.
-    status: Literal["passed", "failed", "skipped", "error"]  # One result for each declared test.
+    status: Literal[
+        "passed", "failed", "skipped", "error"
+    ]  # One result for each declared test.
     duration: float | None  # Observed test seconds.
     failure_digest: str | None  # Captured failure evidence artifact.
 
@@ -292,8 +324,12 @@ class ExecutionCapture:
 class ParsedOutcome:
     """Classified evaluation outcome derived by parsing execution capture."""
 
-    outcome: Literal["accept", "reject", "invalid_evaluation", "error"]  # Raw decision class.
-    evaluation_validity: Literal["valid", "invalid"]  # Inclusion eligibility before repeats.
+    outcome: Literal[
+        "accept", "reject", "invalid_evaluation", "error"
+    ]  # Raw decision class.
+    evaluation_validity: Literal[
+        "valid", "invalid"
+    ]  # Inclusion eligibility before repeats.
     error_code: str | None  # Machine-readable failure detail.
     report: TestReport | None  # Validated report or null.
     evidence_digests: tuple[str, ...]  # Bytes used in the classification.
@@ -303,7 +339,9 @@ class ParsedOutcome:
 class AuditOptions:
     """Parsed CLI options for verifierci audit."""
 
-    task_files: tuple[str, ...]  # Explicit task manifests or resolved benchmark entries.
+    task_files: tuple[
+        str, ...
+    ]  # Explicit task manifests or resolved benchmark entries.
     benchmark_file: str | None  # Frozen benchmark input, exclusive with explicit tasks.
     panel_file: str  # Frozen panel file.
     baseline_file: str  # Verifier manifest or per-task mapping file.
@@ -376,7 +414,9 @@ class BootstrapResult:
     valid_draws: int  # Number of defined bootstrap replicates.
     total_draws: int  # Number attempted under the plan.
     method: str  # Exact task/repository resampling definition.
-    warnings: tuple[str, ...]  # Few clusters, undefined draws or zero observed variance.
+    warnings: tuple[
+        str, ...
+    ]  # Few clusters, undefined draws or zero observed variance.
 
 
 @dataclass(frozen=True, slots=True)
@@ -503,16 +543,22 @@ def _json_no_duplicates(ordered_pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return res
 
 
-def decode_record(kind: str, payload: bytes, *, max_bytes: int = 10 * 1024 * 1024) -> object:
+def decode_record(
+    kind: str, payload: bytes, *, max_bytes: int = 10 * 1024 * 1024
+) -> object:
     """Decode a canonical byte stream into a validated domain record."""
     if len(payload) > max_bytes:
-        raise ValidationError(f"Payload size {len(payload)} bytes exceeds maximum {max_bytes} bytes.")
+        raise ValidationError(
+            f"Payload size {len(payload)} bytes exceeds maximum {max_bytes} bytes."
+        )
 
     if kind not in _KIND_REGISTRY:
         raise ValidationError(f"Unknown record kind: '{kind}'.")
 
     try:
-        data = json.loads(payload.decode("utf-8"), object_pairs_hook=_json_no_duplicates)
+        data = json.loads(
+            payload.decode("utf-8"), object_pairs_hook=_json_no_duplicates
+        )
     except Exception as exc:
         raise ValidationError(f"Invalid JSON payload: {exc}") from exc
 
@@ -525,13 +571,17 @@ def decode_record(kind: str, payload: bytes, *, max_bytes: int = 10 * 1024 * 102
 
 def _instantiate_dataclass(cls: Any, data: Any) -> Any:
     if not isinstance(data, dict):
-        raise ValidationError(f"Expected dict for dataclass {cls.__name__}, got {type(data).__name__}.")
+        raise ValidationError(
+            f"Expected dict for dataclass {cls.__name__}, got {type(data).__name__}."
+        )
 
     field_types = get_type_hints(cls)
     kwargs: dict[str, Any] = {}
     for f in fields(cls):
         if f.name not in data:
-            raise ValidationError(f"Missing required field '{f.name}' for {cls.__name__}.")
+            raise ValidationError(
+                f"Missing required field '{f.name}' for {cls.__name__}."
+            )
         raw_val = data[f.name]
         target_type = field_types.get(f.name, Any)
         kwargs[f.name] = _convert_field(target_type, raw_val)
@@ -548,7 +598,7 @@ def _convert_field(target_type: Any, val: Any) -> Any:
                 clean_str = val.replace("Z", "+00:00")
                 dt = datetime.fromisoformat(clean_str)
                 if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=timezone.utc)
+                    dt = dt.replace(tzinfo=UTC)
                 return dt
             except Exception as exc:
                 raise ValidationError(f"Cannot parse datetime '{val}': {exc}") from exc
@@ -569,4 +619,3 @@ def _convert_field(target_type: Any, val: Any) -> Any:
         return _instantiate_dataclass(target_type, val)
 
     return val
-
