@@ -1,0 +1,45 @@
+# Retry-contract proposed stronger verifier (v2)
+#
+# The proposed stronger verifier. Per SDD §1.3 motivating example:
+#   - Accepts:  reference solution              ← correct
+#   - Rejects:  valid alternative (no helper)   ← WRONG; this is the defect to detect
+#   - Rejects:  incorrect permanent-retry impl  ← correct
+#
+# Release decision: BLOCKED — wrongly rejects the valid alternative.
+# Attach both cases and their evidence; retain the behavioural assertion
+# and remove any assertion about private structure.
+#
+verifier_id: retry-contract-v2
+version: "1.0.0"
+mode: compatibility
+parent_verifier: retry-contract-v1@1.0.0
+command: ["python", "-m", "pytest", "tests/", "--json-report", "--json-report-file=/out/report.json", "-q"]
+build_command: []
+parser_id: pytest-report-v1
+report_path: "report.json"
+expected_collection:
+  - "tests/test_retry.py::test_permanent_failure_no_retry"
+  - "tests/test_retry.py::test_permanent_failure_call_count"
+  - "tests/test_retry.py::test_transient_then_success"
+  - "tests/test_retry.py::test_three_transients_then_success"
+  - "tests/test_retry.py::test_four_transients_exhausted"
+  - "tests/test_retry.py::test_immediate_success"
+required_pass_ids:
+  - "tests/test_retry.py::test_permanent_failure_no_retry"
+  - "tests/test_retry.py::test_permanent_failure_call_count"
+  - "tests/test_retry.py::test_transient_then_success"
+  - "tests/test_retry.py::test_three_transients_then_success"
+  - "tests/test_retry.py::test_four_transients_exhausted"
+  - "tests/test_retry.py::test_immediate_success"
+permitted_skips: []
+allowed_edit_paths:
+  - "src/"
+timeout_seconds: 60
+compatible_contract_versions:
+  - "retry-contract@1.0.0"
+notes: >
+  Proposed stronger verifier. Catches permanent-failure retry defect.
+  BLOCKED: also wrongly rejects the valid alternative (no private helper).
+  Sequences used: permanent, transient+success, 3×transient+success, 4×transient.
+  No check requires a helper name (SDD §1.3 normative).
+

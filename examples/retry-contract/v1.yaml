@@ -1,0 +1,32 @@
+# Retry-contract baseline verifier (v1)
+#
+# The existing weaker verifier. Per SDD §1.3 motivating example:
+#   - Accepts: reference solution
+#   - Accepts: valid alternative (no private helper) ← wrong; should reject invalid only
+#   - Accepts: incorrect implementation that retries permanent failures ← bug
+#
+verifier_id: retry-contract-v1
+version: "1.0.0"
+mode: compatibility
+command: ["python", "-m", "pytest", "tests/", "--json-report", "--json-report-file=/out/report.json", "-q"]
+build_command: []
+parser_id: pytest-report-v1
+report_path: "report.json"
+expected_collection:
+  - "tests/test_retry.py::test_permanent_failure_no_retry"
+  - "tests/test_retry.py::test_transient_then_success"
+  - "tests/test_retry.py::test_max_retries_exhausted"
+  - "tests/test_retry.py::test_immediate_success"
+required_pass_ids:
+  - "tests/test_retry.py::test_transient_then_success"
+  - "tests/test_retry.py::test_immediate_success"
+permitted_skips: []
+allowed_edit_paths:
+  - "src/"
+timeout_seconds: 60
+compatible_contract_versions:
+  - "retry-contract@1.0.0"
+notes: >
+  Baseline verifier. Does not assert against private helper names.
+  Weak on permanent-failure retry detection (SDD §1.3 motivating table).
+
