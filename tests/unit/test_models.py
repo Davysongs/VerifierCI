@@ -240,7 +240,7 @@ def test_validate_task():
         provenance="repo",
         eligibility="eligible",
         notes="",
-        created_at=datetime(2026, 9, 18, 16, 0, 0),
+        created_at=datetime(2026, 9, 18, 16, 0, 0),  # noqa: DTZ001
     )
     with pytest.raises(ValidationError, match="timezone-aware UTC"):
         validate_task(naive_dt_task, contract)
@@ -722,4 +722,3 @@ def test_register_verifier_stub_raises_not_implemented():
         match="Phase 1 stub: verifier registry persistence is not implemented yet.",
     ):
         register_verifier(conn, version, manifest)
-
