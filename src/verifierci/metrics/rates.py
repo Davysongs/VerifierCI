@@ -6,13 +6,12 @@ coverage and paired changes.  Zero denominators return None (null), not zero.
 gate.py arrives in Phase 3.
 """
 from __future__ import annotations
-from typing import Optional
 
 
 def invalid_acceptance_rate(
     accepted: int,
     total_invalid: int,
-) -> Optional[float]:
+) -> float | None:
     """Challenge-panel Invalid Acceptance Rate (IAR).
 
     Returns None when total_invalid is zero.
@@ -25,7 +24,7 @@ def invalid_acceptance_rate(
 def valid_rejection_rate(
     rejected: int,
     total_valid: int,
-) -> Optional[float]:
+) -> float | None:
     """Valid Rejection Rate (VRR).
 
     Returns None when total_valid is zero.
