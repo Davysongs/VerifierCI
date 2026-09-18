@@ -5,8 +5,6 @@ SDD Section 5 & Section 6.1 exit categories.
 
 from __future__ import annotations
 
-import pytest
-
 from verifierci.errors import (
     ErrorCode,
     IdentityConflict,

@@ -6,8 +6,7 @@ SDD Sections 4.1, 4.4, 5, and Section 9.1 invariants.
 from __future__ import annotations
 
 from dataclasses import FrozenInstanceError
-from datetime import datetime, timezone
-import math
+from datetime import UTC, datetime
 
 import pytest
 
@@ -20,21 +19,16 @@ from verifierci.models import (
     ResourceUsage,
     ReviewVote,
     Task,
-    VerifierManifest,
-    VerifierVersion,
     canonical_bytes,
     compare_versions,
     contract_hash,
     decode_record,
     encode_record,
-    manifest_hash,
     requirement_hash,
     resolve_command,
     validate_attempt,
     validate_lineage,
-    validate_membership,
     validate_task,
-    validate_verifier,
     validate_wire_version,
 )
 
@@ -76,7 +70,7 @@ def _sample_contract(req_hashes: tuple[str, ...] = ()) -> Contract:
         allowed_variation="standard",
         unresolved_questions=(),
         evidence_digests=("b" * 64,),
-        created_at=datetime(2026, 9, 18, 12, 0, 0, tzinfo=timezone.utc),
+        created_at=datetime(2026, 9, 18, 12, 0, 0, tzinfo=UTC),
     )
 
 
@@ -102,7 +96,7 @@ def test_dataclass_immutability():
         provenance="source",
         eligibility="eligible",
         notes="",
-        created_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
     )
     with pytest.raises(FrozenInstanceError):
         task.statement = "New statement"  # type: ignore[misc]
@@ -124,7 +118,7 @@ def test_canonical_json_non_finite_float_rejected():
 
 def test_canonical_json_naive_datetime_rejected():
     with pytest.raises(ValidationError, match="Datetime must be timezone-aware"):
-        canonical_bytes({"time": datetime(2026, 9, 18, 12, 0, 0)})
+        canonical_bytes({"time": datetime(2026, 9, 18, 12, 0, 0)})  # noqa: DTZ001
 
 
 def test_requirement_hash_alters_on_any_field():
@@ -195,7 +189,7 @@ def test_validate_task():
         provenance="repo",
         eligibility="eligible",
         notes="",
-        created_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
     )
     # Should not raise
     validate_task(valid_task, contract)
@@ -214,7 +208,7 @@ def test_validate_task():
         provenance="repo",
         eligibility="eligible",
         notes="",
-        created_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
     )
     with pytest.raises(ValidationError, match="task_key"):
         validate_task(bad_key_task, contract)
@@ -262,8 +256,8 @@ def test_validate_attempt():
         evaluation_validity="valid",
         error_code=None,
         disposition="authoritative",
-        started_at=datetime.now(timezone.utc),
-        finished_at=datetime.now(timezone.utc),
+        started_at=datetime.now(UTC),
+        finished_at=datetime.now(UTC),
         exit_code=0,
         stdout_hash="0" * 64,
         stderr_hash="0" * 64,
@@ -286,8 +280,8 @@ def test_validate_attempt():
         evaluation_validity="valid",
         error_code=None,
         disposition="authoritative",
-        started_at=datetime.now(timezone.utc),
-        finished_at=datetime.now(timezone.utc),
+        started_at=datetime.now(UTC),
+        finished_at=datetime.now(UTC),
         exit_code=0,
         stdout_hash=None,
         stderr_hash=None,
@@ -304,7 +298,7 @@ def test_validate_attempt():
 
 
 def test_validate_lineage_cycle_detection():
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     c1 = PatchCase(
         case_id="case-1",
         task_key="t@1",
@@ -345,7 +339,7 @@ def test_protocol_encode_decode_roundtrip():
         minutes=15.5,
         blinded_to_verifier=True,
         independent_of_author=True,
-        recorded_at=datetime(2026, 9, 18, 14, 30, 0, tzinfo=timezone.utc),
+        recorded_at=datetime(2026, 9, 18, 14, 30, 0, tzinfo=UTC),
     )
     encoded = encode_record(vote)
     decoded = decode_record("ReviewVote", encoded)
