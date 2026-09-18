@@ -569,7 +569,7 @@ def decode_record(
     return _instantiate_dataclass(cls, data)
 
 
-def _instantiate_dataclass(cls: type, data: Any) -> Any:
+def _instantiate_dataclass(cls: Any, data: Any) -> Any:
     if not isinstance(data, dict):
         raise ValidationError(
             f"Expected dict for dataclass {cls.__name__}, got {type(data).__name__}."
