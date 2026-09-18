@@ -19,16 +19,20 @@ from verifierci.models import (
     ResourceUsage,
     ReviewVote,
     Task,
+    VerifierManifest,
+    VerifierVersion,
     canonical_bytes,
     compare_versions,
     contract_hash,
     decode_record,
     encode_record,
+    manifest_hash,
     requirement_hash,
     resolve_command,
     validate_attempt,
     validate_lineage,
     validate_task,
+    validate_verifier,
     validate_wire_version,
 )
 
@@ -382,3 +386,156 @@ def test_validate_wire_version():
     validate_wire_version("1.0")
     with pytest.raises(ValidationError, match="Unsupported wire version"):
         validate_wire_version("99.0")
+
+
+def test_verifier_manifest_and_version():
+    m_dict = {
+        "mode": "compatibility",
+        "command": ("pytest", "-q"),
+        "build_command": (),
+        "expected_collection": ("test_a",),
+        "parser_id": "pytest-report-v1",
+        "report_path": "report.json",
+        "payload_digest": "d" * 64,
+        "allowed_edit_paths": ("src/",),
+        "required_pass_ids": ("test_a",),
+        "permitted_skips": (),
+        "timeout_seconds": 60,
+    }
+    m_hash = manifest_hash(m_dict)
+    assert len(m_hash) == 64
+
+    manifest = VerifierManifest(manifest_hash=m_hash, **m_dict)  # type: ignore[arg-type]
+    version = VerifierVersion(
+        verifier_key="v-1@1.0.0",
+        verifier_id="v-1",
+        version="1.0.0",
+        parent_key=None,
+        manifest_hash=m_hash,
+        payload_digest="d" * 64,
+        compatible_contract_hashes=("c" * 64,),
+        created_at=datetime.now(UTC),
+    )
+    validate_verifier(version, manifest)
+
+    # Bad verifier key
+    bad_version = VerifierVersion(
+        verifier_key="wrong-key",
+        verifier_id="v-1",
+        version="1.0.0",
+        parent_key=None,
+        manifest_hash=m_hash,
+        payload_digest="d" * 64,
+        compatible_contract_hashes=("c" * 64,),
+        created_at=datetime.now(UTC),
+    )
+    with pytest.raises(ValidationError, match="verifier_key"):
+        validate_verifier(bad_version, manifest)
+
+
+def test_panel_digest_and_membership():
+    from verifierci.models import (
+        Adjudication,
+        PatchPanelMembership,
+        panel_digest,
+        validate_membership,
+    )
+
+    contract = _sample_contract()
+    req = _sample_requirement()
+    case = PatchCase(
+        case_id="case-1",
+        task_key="task-1@1.0.0",
+        diff_digest="0" * 64,
+        base_snapshot_digest="0" * 64,
+        source="human",
+        source_run_id=None,
+        parent_case_ids=(),
+        family_id="f-1",
+        role="challenge",
+        provenance_digest="0" * 64,
+        licence="Apache-2.0",
+        created_at=datetime.now(UTC),
+    )
+    review = Adjudication(
+        adjudication_id="adj-1",
+        case_id="case-1",
+        contract_hash=contract.contract_hash,
+        version=1,
+        label="valid",
+        review_status="independent",
+        votes=(),
+        rationale="Passes all tests",
+        requirement_hashes=(req.requirement_hash,),
+        witness_ids=(),
+        uncertainty="",
+        supersedes_id=None,
+        created_at=datetime.now(UTC),
+    )
+    validate_membership(case, review, contract)
+
+    # Membership digest
+    m1 = PatchPanelMembership(
+        panel_key="p@1",
+        case_id="case-1",
+        adjudication_id="adj-1",
+        ordinal=0,
+        expected_control_outcomes={},
+    )
+    p_digest = panel_digest((m1,))
+    assert len(p_digest) == 64
+
+
+def test_validate_matrix_and_result_digest():
+    from verifierci.models import (
+        AcceptanceMatrix,
+        AuditManifest,
+        AuditResult,
+        result_digest,
+        validate_matrix,
+    )
+
+    manifest = AuditManifest(
+        manifest_hash="m" * 64,
+        run_id="run-123",
+        benchmark_version="b-1",
+        task_pins=(),
+        panel_key="p@1",
+        adjudication_version="adj-v1",
+        evaluation_harness_version="h-1",
+        config_hash="cfg" * 21 + "c",
+        policy_hash="pol" * 21 + "p",
+        analysis_plan_hash=None,
+        timestamp=datetime.now(UTC),
+        host_fingerprint="host",
+        seed=None,
+        agent_version=None,
+        model_identifier=None,
+        max_repetitions=3,
+        max_attempts_per_job=2,
+        timeout_seconds=120,
+        resource_policy="res",
+        expansion_digest="exp" * 21 + "e",
+        parent_run_id=None,
+    )
+    matrix = AcceptanceMatrix(
+        matrix_id="mat-1",
+        run_id="run-123",
+        reducer_version="1.0",
+        cells=(),
+        complete=True,
+        source_attempts_digest="src" * 21 + "s",
+        created_at=datetime.now(UTC),
+    )
+    validate_matrix(matrix, manifest)
+
+    result = AuditResult(
+        manifest=manifest,
+        matrix=matrix,
+        metrics=(),
+        gate=None,
+        diagnostics=(),
+        artifacts=(),
+    )
+    r_digest = result_digest(result)
+    assert len(r_digest) == 64
