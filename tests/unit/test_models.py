@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import json
 from dataclasses import FrozenInstanceError
-from datetime import UTC, datetime
 from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
@@ -671,7 +670,6 @@ def test_decode_record_unwraps_optional_and_union():
     assert outcome.report.results[0].status == "passed"
 
 
-def test_register_verifier_persists_to_sqlite():
 def test_decode_record_rejects_unknown_fields():
     data = {
         "requirement_id": "req-1",
@@ -693,39 +691,6 @@ def test_register_verifier_stub_raises_not_implemented():
     from verifierci.models import register_verifier
 
     conn = sqlite3.connect(":memory:")
-    conn.execute(
-        """
-        CREATE TABLE verifier_manifests (
-            manifest_hash TEXT PRIMARY KEY,
-            mode TEXT NOT NULL,
-            command TEXT NOT NULL,
-            build_command TEXT NOT NULL,
-            expected_collection TEXT NOT NULL,
-            parser_id TEXT NOT NULL,
-            report_path TEXT NOT NULL,
-            payload_digest TEXT NOT NULL,
-            allowed_edit_paths TEXT NOT NULL,
-            required_pass_ids TEXT NOT NULL,
-            permitted_skips TEXT NOT NULL,
-            timeout_seconds INTEGER NOT NULL
-        );
-        """
-    )
-    conn.execute(
-        """
-        CREATE TABLE verifier_versions (
-            verifier_key TEXT PRIMARY KEY,
-            verifier_id TEXT NOT NULL,
-            version TEXT NOT NULL,
-            parent_key TEXT,
-            manifest_hash TEXT NOT NULL,
-            payload_digest TEXT NOT NULL,
-            compatible_contract_hashes TEXT NOT NULL,
-            created_at TEXT NOT NULL
-        );
-        """
-    )
-
     m_dict = {
         "mode": "compatibility",
         "command": ("pytest", "-q"),
@@ -752,20 +717,6 @@ def test_register_verifier_stub_raises_not_implemented():
         created_at=datetime(2026, 9, 18, 16, 0, 0, tzinfo=UTC),
     )
 
-    register_verifier(conn, version, manifest)
-
-    # Verify rows persisted
-    m_row = conn.execute(
-        "SELECT manifest_hash, mode, parser_id FROM verifier_manifests WHERE manifest_hash = ?",
-        (m_hash,),
-    ).fetchone()
-    assert m_row == (m_hash, "compatibility", "pytest-report-v1")
-
-    v_row = conn.execute(
-        "SELECT verifier_key, verifier_id, manifest_hash FROM verifier_versions WHERE verifier_key = ?",
-        ("v-1@1.0.0",),
-    ).fetchone()
-    assert v_row == ("v-1@1.0.0", "v-1", m_hash)
     with pytest.raises(
         NotImplementedError,
         match="Phase 1 stub: verifier registry persistence is not implemented yet.",

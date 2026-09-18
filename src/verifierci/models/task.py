@@ -13,7 +13,6 @@ import json
 import math
 import re
 from dataclasses import dataclass, fields, is_dataclass
-from datetime import UTC, datetime
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
@@ -268,6 +267,5 @@ def validate_task(task: Task, contract: Contract) -> None:
         )
     if task.eligibility not in ("eligible", "excluded", "pending"):
         raise ValidationError(f"Invalid task eligibility: {task.eligibility}")
-    if task.created_at.tzinfo is None:
     if task.created_at.tzinfo is None or task.created_at.utcoffset() != timedelta(0):
         raise ValidationError("task.created_at must be a timezone-aware UTC datetime.")
