@@ -7,10 +7,11 @@ All domain entities are immutable (@dataclass(frozen=True, slots=True)).
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, Literal
 
 from verifierci.errors import ValidationError
@@ -174,3 +175,52 @@ def register_verifier(
     manifest: VerifierManifest,
 ) -> None:
     """Store manifest and version records in the database."""
+    validate_verifier(version, manifest)
+    with conn:
+        conn.execute(
+            """
+            INSERT INTO verifier_manifests (
+                manifest_hash, mode, command, build_command, expected_collection,
+                parser_id, report_path, payload_digest, allowed_edit_paths,
+                required_pass_ids, permitted_skips, timeout_seconds
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                manifest.manifest_hash,
+                manifest.mode,
+                json.dumps(list(manifest.command)),
+                json.dumps(list(manifest.build_command)),
+                json.dumps(list(manifest.expected_collection)),
+                manifest.parser_id,
+                manifest.report_path,
+                manifest.payload_digest,
+                json.dumps(list(manifest.allowed_edit_paths)),
+                json.dumps(list(manifest.required_pass_ids)),
+                json.dumps(list(manifest.permitted_skips)),
+                manifest.timeout_seconds,
+            ),
+        )
+        created_at_str = (
+            version.created_at.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+            if version.created_at.tzinfo
+            else version.created_at.strftime("%Y-%m-%dT%H:%M:%SZ")
+        )
+        conn.execute(
+            """
+            INSERT INTO verifier_versions (
+                verifier_key, verifier_id, version, parent_key,
+                manifest_hash, payload_digest, compatible_contract_hashes, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                version.verifier_key,
+                version.verifier_id,
+                version.version,
+                version.parent_key,
+                version.manifest_hash,
+                version.payload_digest,
+                json.dumps(list(version.compatible_contract_hashes)),
+                created_at_str,
+            ),
+        )
+    conn.commit()

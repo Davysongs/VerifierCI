@@ -5,6 +5,7 @@ SDD Sections 4.1, 4.4, 5, and Section 9.1 invariants.
 
 from __future__ import annotations
 
+import json
 from dataclasses import FrozenInstanceError
 from datetime import UTC, datetime
 
@@ -539,3 +540,174 @@ def test_validate_matrix_and_result_digest():
     )
     r_digest = result_digest(result)
     assert len(r_digest) == 64
+
+
+def test_decode_record_resolves_type_checking_references():
+    from verifierci.models import Adjudication, ReviewVote
+
+    data = {
+        "adjudication_id": "adj-1",
+        "case_id": "case-1",
+        "contract_hash": "c" * 64,
+        "version": 1,
+        "label": "valid",
+        "review_status": "independent",
+        "votes": [
+            {
+                "reviewer_id": "rev-1",
+                "label": "valid",
+                "rationale": "Verified",
+                "minutes": 10.0,
+                "blinded_to_verifier": True,
+                "independent_of_author": True,
+                "recorded_at": "2026-09-18T16:00:00Z",
+            }
+        ],
+        "rationale": "All good",
+        "requirement_hashes": ["r" * 64],
+        "witness_ids": [],
+        "uncertainty": "",
+        "supersedes_id": None,
+        "created_at": "2026-09-18T16:00:00Z",
+    }
+    payload = json.dumps(data).encode("utf-8")
+    decoded = decode_record("Adjudication", payload)
+    assert isinstance(decoded, Adjudication)
+    assert len(decoded.votes) == 1
+    assert isinstance(decoded.votes[0], ReviewVote)
+    assert decoded.votes[0].reviewer_id == "rev-1"
+
+
+def test_decode_record_unwraps_optional_and_union():
+    from verifierci.models import Artifact, ParsedOutcome, TestReport
+
+    # Artifact with retention_until present
+    art_data = {
+        "digest": "a" * 64,
+        "kind": "diff",
+        "size_bytes": 100,
+        "storage_uri": "/path/to/diff",
+        "media_type": "text/x-diff",
+        "access_policy": "public",
+        "retention_until": "2026-09-18T20:00:00Z",
+        "available": True,
+        "created_at": "2026-09-18T16:00:00Z",
+    }
+    art = decode_record("Artifact", json.dumps(art_data).encode("utf-8"))
+    assert isinstance(art, Artifact)
+    assert isinstance(art.retention_until, datetime)
+    assert art.retention_until == datetime(2026, 9, 18, 20, 0, 0, tzinfo=UTC)
+
+    # Artifact with retention_until None
+    art_data["retention_until"] = None
+    art_none = decode_record("Artifact", json.dumps(art_data).encode("utf-8"))
+    assert isinstance(art_none, Artifact)
+    assert art_none.retention_until is None
+
+    # ParsedOutcome with nested TestReport in report field
+    outcome_data = {
+        "outcome": "accept",
+        "evaluation_validity": "valid",
+        "error_code": None,
+        "report": {
+            "schema_version": "1.0",
+            "collected_ids": ["test_1"],
+            "results": [
+                {
+                    "test_id": "test_1",
+                    "status": "passed",
+                    "duration": 0.5,
+                    "failure_digest": None,
+                }
+            ],
+            "completed": True,
+            "runner_error": None,
+        },
+        "evidence_digests": [],
+    }
+    outcome = decode_record("ParsedOutcome", json.dumps(outcome_data).encode("utf-8"))
+    assert isinstance(outcome, ParsedOutcome)
+    assert isinstance(outcome.report, TestReport)
+    assert outcome.report.collected_ids == ("test_1",)
+    assert outcome.report.results[0].status == "passed"
+
+
+def test_register_verifier_persists_to_sqlite():
+    import sqlite3
+
+    from verifierci.models import register_verifier
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE verifier_manifests (
+            manifest_hash TEXT PRIMARY KEY,
+            mode TEXT NOT NULL,
+            command TEXT NOT NULL,
+            build_command TEXT NOT NULL,
+            expected_collection TEXT NOT NULL,
+            parser_id TEXT NOT NULL,
+            report_path TEXT NOT NULL,
+            payload_digest TEXT NOT NULL,
+            allowed_edit_paths TEXT NOT NULL,
+            required_pass_ids TEXT NOT NULL,
+            permitted_skips TEXT NOT NULL,
+            timeout_seconds INTEGER NOT NULL
+        );
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE verifier_versions (
+            verifier_key TEXT PRIMARY KEY,
+            verifier_id TEXT NOT NULL,
+            version TEXT NOT NULL,
+            parent_key TEXT,
+            manifest_hash TEXT NOT NULL,
+            payload_digest TEXT NOT NULL,
+            compatible_contract_hashes TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        """
+    )
+
+    m_dict = {
+        "mode": "compatibility",
+        "command": ("pytest", "-q"),
+        "build_command": (),
+        "expected_collection": ("test_a",),
+        "parser_id": "pytest-report-v1",
+        "report_path": "report.json",
+        "payload_digest": "d" * 64,
+        "allowed_edit_paths": ("src/",),
+        "required_pass_ids": ("test_a",),
+        "permitted_skips": (),
+        "timeout_seconds": 60,
+    }
+    m_hash = manifest_hash(m_dict)
+    manifest = VerifierManifest(manifest_hash=m_hash, **m_dict)  # type: ignore[arg-type]
+    version = VerifierVersion(
+        verifier_key="v-1@1.0.0",
+        verifier_id="v-1",
+        version="1.0.0",
+        parent_key=None,
+        manifest_hash=m_hash,
+        payload_digest="d" * 64,
+        compatible_contract_hashes=("c" * 64,),
+        created_at=datetime(2026, 9, 18, 16, 0, 0, tzinfo=UTC),
+    )
+
+    register_verifier(conn, version, manifest)
+
+    # Verify rows persisted
+    m_row = conn.execute(
+        "SELECT manifest_hash, mode, parser_id FROM verifier_manifests WHERE manifest_hash = ?",
+        (m_hash,),
+    ).fetchone()
+    assert m_row == (m_hash, "compatibility", "pytest-report-v1")
+
+    v_row = conn.execute(
+        "SELECT verifier_key, verifier_id, manifest_hash FROM verifier_versions WHERE verifier_key = ?",
+        ("v-1@1.0.0",),
+    ).fetchone()
+    assert v_row == ("v-1@1.0.0", "v-1", m_hash)

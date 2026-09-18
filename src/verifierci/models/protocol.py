@@ -8,15 +8,26 @@ or schema-validated TypedDicts. No pickle or dynamic code execution is permitted
 from __future__ import annotations
 
 import json
+import types
 from dataclasses import dataclass, fields, is_dataclass
 from datetime import UTC, datetime
-from typing import Any, Literal, TypedDict, get_type_hints
+from typing import Any, Literal, TypedDict, Union, get_args, get_origin, get_type_hints
 
 from verifierci.errors import ValidationError
-from verifierci.models.panel import PatchCase
+from verifierci.models.panel import (
+    Adjudication,
+    AgentRun,
+    PatchCase,
+    PatchPanel,
+    PatchPanelMembership,
+    Witness,
+)
 from verifierci.models.result import (
     AcceptanceMatrix,
     Artifact,
+    AuditManifest,
+    AuditRun,
+    EvaluationAttempt,
     GateDecision,
     MetricResult,
 )
@@ -525,12 +536,20 @@ _KIND_REGISTRY: dict[str, type] = {
     "RepositorySnapshot": RepositorySnapshot,
     "Environment": Environment,
     "PatchCase": PatchCase,
+    "Witness": Witness,
+    "Adjudication": Adjudication,
+    "PatchPanel": PatchPanel,
+    "PatchPanelMembership": PatchPanelMembership,
+    "AgentRun": AgentRun,
     "VerifierVersion": VerifierVersion,
     "VerifierManifest": VerifierManifest,
+    "EvaluationAttempt": EvaluationAttempt,
     "AcceptanceMatrix": AcceptanceMatrix,
     "MetricResult": MetricResult,
     "GateDecision": GateDecision,
     "Artifact": Artifact,
+    "AuditManifest": AuditManifest,
+    "AuditRun": AuditRun,
 }
 
 
@@ -575,7 +594,13 @@ def _instantiate_dataclass(cls: Any, data: Any) -> Any:
             f"Expected dict for dataclass {cls.__name__}, got {type(data).__name__}."
         )
 
-    field_types = get_type_hints(cls)
+    try:
+        field_types = get_type_hints(cls, localns=_KIND_REGISTRY)
+    except Exception as exc:
+        raise ValidationError(
+            f"Cannot resolve type hints for dataclass {cls.__name__}: {exc}."
+        ) from exc
+
     kwargs: dict[str, Any] = {}
     for f in fields(cls):
         if f.name not in data:
@@ -591,6 +616,14 @@ def _instantiate_dataclass(cls: Any, data: Any) -> Any:
 def _convert_field(target_type: Any, val: Any) -> Any:
     if val is None:
         return None
+
+    # Unwrap Optional/Union annotations (e.g. datetime | None, TestReport | None)
+    origin = get_origin(target_type)
+    if origin is Union or origin is types.UnionType:
+        union_args = [a for a in get_args(target_type) if a is not type(None)]
+        if len(union_args) == 1:
+            return _convert_field(union_args[0], val)
+
     if target_type is datetime:
         if isinstance(val, str):
             try:
@@ -605,17 +638,16 @@ def _convert_field(target_type: Any, val: Any) -> Any:
         return val
 
     # If target_type is a tuple
-    origin = getattr(target_type, "__origin__", None)
     if origin is tuple:
-        args = getattr(target_type, "__args__", ())
+        tuple_args = get_args(target_type)
         if not isinstance(val, (list, tuple)):
             raise ValidationError(f"Expected tuple/list, got {type(val).__name__}.")
-        if args and args[-1] is Ellipsis:
-            elem_type = args[0]
+        if tuple_args and tuple_args[-1] is Ellipsis:
+            elem_type = tuple_args[0]
             return tuple(_convert_field(elem_type, x) for x in val)
         return tuple(val)
 
-    if is_dataclass(target_type):
+    if isinstance(target_type, type) and is_dataclass(target_type):
         return _instantiate_dataclass(target_type, val)
 
     return val
