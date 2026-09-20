@@ -35,8 +35,7 @@ class CommandSpec:
     timeout_seconds: int  # Deadline bounded by the audit and sandbox policies.
 
     def __post_init__(self) -> None:
-        if not isinstance(self.env, MappingProxyType):
-            object.__setattr__(self, "env", MappingProxyType(dict(self.env)))
+        object.__setattr__(self, "env", MappingProxyType(dict(self.env)))
 
 
 @dataclass(frozen=True, slots=True)

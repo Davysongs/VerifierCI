@@ -12,7 +12,7 @@ import math
 import types
 from collections.abc import Mapping
 from dataclasses import dataclass, fields, is_dataclass
-from datetime import UTC, datetime
+from datetime import datetime
 from types import MappingProxyType
 from typing import Any, Literal, TypedDict, Union, get_args, get_origin, get_type_hints
 
@@ -96,9 +96,7 @@ class ResourceUsage:
     bytes_written: int | None  # Measured output bytes within the attempt quota.
 
     def __post_init__(self) -> None:
-        if self.model_usage is not None and not isinstance(
-            self.model_usage, MappingProxyType
-        ):
+        if self.model_usage is not None:
             object.__setattr__(
                 self, "model_usage", MappingProxyType(dict(self.model_usage))
             )
@@ -167,13 +165,13 @@ class MetricTerm:
 
     task_key: str  # Task receiving one macro-average weight.
     numerator: int  # Eligible errors of the requested kind.
+    denominator: int  # Eligible cases for this task and label.
     excluded: Mapping[
         str, int
     ]  # Counts by unresolved, control, flaky or execution reason.
 
     def __post_init__(self) -> None:
-        if not isinstance(self.excluded, MappingProxyType):
-            object.__setattr__(self, "excluded", MappingProxyType(dict(self.excluded)))
+        object.__setattr__(self, "excluded", MappingProxyType(dict(self.excluded)))
 
 
 @dataclass(frozen=True, slots=True)
@@ -307,8 +305,7 @@ class AnalysisPlan:
     stopping_rule: str  # Sample size/rerun criteria fixed before outcome inspection.
 
     def __post_init__(self) -> None:
-        if not isinstance(self.budgets, MappingProxyType):
-            object.__setattr__(self, "budgets", MappingProxyType(dict(self.budgets)))
+        object.__setattr__(self, "budgets", MappingProxyType(dict(self.budgets)))
 
 
 @dataclass(frozen=True, slots=True)
@@ -435,9 +432,7 @@ class TelemetryEvent:
     pricing_version: str | None  # Identity of price assumptions.
 
     def __post_init__(self) -> None:
-        if self.model_usage is not None and not isinstance(
-            self.model_usage, MappingProxyType
-        ):
+        if self.model_usage is not None:
             object.__setattr__(
                 self, "model_usage", MappingProxyType(dict(self.model_usage))
             )
@@ -742,8 +737,12 @@ def _convert_field(target_type: Any, val: Any) -> Any:
                 clean_str = val.replace("Z", "+00:00")
                 dt = datetime.fromisoformat(clean_str)
                 if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=UTC)
+                    raise ValidationError(
+                        f"Datetime string '{val}' must include timezone information."
+                    )
                 return dt
+            except ValidationError:
+                raise
             except Exception as exc:
                 raise ValidationError(f"Cannot parse datetime '{val}': {exc}") from exc
         if isinstance(val, datetime):

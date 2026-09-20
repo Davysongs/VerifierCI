@@ -988,3 +988,91 @@ def test_strict_recursive_decoding_and_schema_version():
     mismatched_env = dict(envelope, kind="Task")
     with pytest.raises(ValidationError, match="Envelope kind"):
         decode_record("Requirement", json.dumps(mismatched_env).encode("utf-8"))
+
+
+def test_commandspec_mappingproxy_isolated_from_backing_mutation():
+    from types import MappingProxyType
+
+    from verifierci.models import CommandSpec
+
+    backing = {"VAR": "initial"}
+    proxy = MappingProxyType(backing)
+    cmd = CommandSpec(
+        argv=("echo", "hi"),
+        cwd="/",
+        env=proxy,
+        stdin_digest=None,
+        timeout_seconds=10,
+    )
+
+    # Mutate the backing dict of the passed MappingProxyType
+    backing["VAR"] = "mutated"
+    assert cmd.env["VAR"] == "initial"
+
+
+def test_metric_term_with_denominator():
+    from verifierci.models import MetricTerm
+
+    term = MetricTerm(
+        task_key="task-1@1.0.0",
+        numerator=2,
+        denominator=5,
+        excluded={"control": 1},
+    )
+    assert term.denominator == 5
+
+    # Decode valid MetricTerm JSON payload
+    data = {
+        "task_key": "task-1@1.0.0",
+        "numerator": 2,
+        "denominator": 5,
+        "excluded": {"control": 1},
+    }
+    decoded = decode_record("MetricTerm", json.dumps(data).encode("utf-8"))
+    assert isinstance(decoded, MetricTerm)
+    assert decoded.denominator == 5
+
+    # Missing denominator raises ValidationError
+    bad_data = {
+        "task_key": "task-1@1.0.0",
+        "numerator": 2,
+        "excluded": {"control": 1},
+    }
+    with pytest.raises(ValidationError, match="Missing required field 'denominator'"):
+        decode_record("MetricTerm", json.dumps(bad_data).encode("utf-8"))
+
+
+def test_decode_record_datetime_timezone_validation():
+    # Naive datetime string raises ValidationError
+    task_data = {
+        "task_key": "task-1@1.0.0",
+        "task_id": "task-1",
+        "version": "1.0.0",
+        "statement": "Implement retry",
+        "adapter": "local",
+        "contract_hash": "0" * 64,
+        "snapshot_digest": "0" * 64,
+        "environment_id": "env-1",
+        "licence": "Apache-2.0",
+        "provenance": "repo",
+        "eligibility": "eligible",
+        "notes": "",
+        "created_at": "2026-09-18T16:00:00",  # No timezone!
+    }
+    with pytest.raises(ValidationError, match="must include timezone information"):
+        decode_record("Task", json.dumps(task_data).encode("utf-8"))
+
+    # Non-UTC timezone parsed successfully (preserving tzinfo for validate_task)
+    task_data["created_at"] = "2026-09-18T16:00:00+05:00"
+    decoded_task = decode_record("Task", json.dumps(task_data).encode("utf-8"))
+    assert (
+        decoded_task.created_at.utcoffset() == timedelta(hours=5)  # type: ignore[attr-defined]
+    )
+
+    # validate_task rejects non-UTC timezone
+    req = _sample_requirement()
+    contract = _sample_contract((req.requirement_hash,))
+    task_data["contract_hash"] = contract.contract_hash
+    decoded_task = decode_record("Task", json.dumps(task_data).encode("utf-8"))
+    with pytest.raises(ValidationError, match="timezone-aware UTC"):
+        validate_task(decoded_task, contract)  # type: ignore[arg-type]
