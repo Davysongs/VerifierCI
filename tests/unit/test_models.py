@@ -13,9 +13,7 @@ import pytest
 
 from verifierci.errors import ValidationError
 from verifierci.models import (
-    SUPPORTED_SCHEMA_VERSIONS,
     AgentRun,
-    AnalysisPlan,
     CommandSpec,
     Contract,
     EvaluationAttempt,
@@ -27,9 +25,7 @@ from verifierci.models import (
     ResourceUsage,
     ReviewVote,
     Task,
-    TelemetryEvent,
     TestReport,
-    TestResult,
     VerifierManifest,
     VerifierVersion,
     canonical_bytes,
@@ -627,7 +623,7 @@ def test_decode_record_resolves_type_checking_references():
 
 
 def test_decode_record_unwraps_optional_and_union():
-    from verifierci.models import Artifact, ParsedOutcome, TestReport
+    from verifierci.models import Artifact, ParsedOutcome
 
     # Artifact with retention_until present
     art_data = {
@@ -955,6 +951,7 @@ def test_decode_record_strict_validation():
         "schema_version": "99.0.0",
         "kind": "Requirement",
         "data": {
+            "requirement_hash": "r" * 64,
             "requirement_id": "REQ-1",
             "text": "Must retry",
             "source_kind": "explicit",
@@ -970,6 +967,7 @@ def test_decode_record_strict_validation():
         "schema_version": "1.0.0",
         "kind": "Requirement",
         "data": {
+            "requirement_hash": "r" * 64,
             "requirement_id": "REQ-1",
             "text": "Must retry",
             "source_kind": "explicit",
@@ -993,3 +991,64 @@ def test_decode_record_strict_validation():
     with pytest.raises(ValidationError, match="Expected bool"):
         decode_record("TestReport", json.dumps(bad_type_report).encode("utf-8"))
 
+    # 6. Mapping decoding and invalid mapping values
+    metric_term_data = {
+        "task_key": "t@1",
+        "numerator": 1,
+        "denominator": 2,
+        "excluded": {"flaky": 0},
+    }
+    mt = decode_record("MetricTerm", json.dumps(metric_term_data).encode("utf-8"))
+    assert isinstance(mt, MetricTerm)
+    assert mt.excluded["flaky"] == 0
+
+    bad_mt_data = {
+        "task_key": "t@1",
+        "numerator": 1,
+        "denominator": 2,
+        "excluded": {"flaky": "not_an_int"},
+    }
+    with pytest.raises(ValidationError, match="Expected int"):
+        decode_record("MetricTerm", json.dumps(bad_mt_data).encode("utf-8"))
+
+    # 7. Invalid int
+    bad_int = {
+        "task_key": "t@1",
+        "numerator": 1,
+        "denominator": "not_an_int",
+        "excluded": {},
+    }
+    with pytest.raises(ValidationError, match="Expected int"):
+        decode_record("MetricTerm", json.dumps(bad_int).encode("utf-8"))
+
+    # 8. Invalid datetime string
+    bad_dt = {
+        "task_key": "t-1@1.0.0",
+        "task_id": "t-1",
+        "version": "1.0.0",
+        "statement": "retry",
+        "adapter": "local",
+        "contract_hash": "c" * 64,
+        "snapshot_digest": "s" * 64,
+        "environment_id": "env-1",
+        "licence": "Apache-2.0",
+        "provenance": "repo",
+        "eligibility": "eligible",
+        "notes": "",
+        "created_at": "invalid-datetime",
+    }
+    with pytest.raises(ValidationError, match="Cannot parse datetime"):
+        decode_record("Task", json.dumps(bad_dt).encode("utf-8"))
+
+    # 9. Invalid tuple type
+    bad_tuple = {
+        "requirement_hash": "r" * 64,
+        "requirement_id": "REQ-1",
+        "text": "Must retry",
+        "source_kind": "explicit",
+        "evidence_digests": "not_a_list",
+        "source_locator": "spec.md",
+        "allowed_variation": "none",
+    }
+    with pytest.raises(ValidationError, match="Expected tuple/list"):
+        decode_record("Requirement", json.dumps(bad_tuple).encode("utf-8"))

@@ -297,7 +297,9 @@ class AnalysisPlan:
     alpha: float  # Family-wise significance level, normally 0.05.
     bootstrap_draws: int  # Default 10000 paired hierarchical draws.
     seed: int  # Random generator seed fixed before analysis.
-    budgets: Mapping[str, float]  # Test runtime, generation and review budgets by method.
+    budgets: Mapping[
+        str, float
+    ]  # Test runtime, generation and review budgets by method.
     exclusions: tuple[str, ...]  # Prespecified missingness and admission rules.
     secondary_hypotheses: tuple[str, ...]  # Confirmatory family for Holm correction.
     stopping_rule: str  # Sample size/rerun criteria fixed before outcome inspection.
@@ -318,9 +320,6 @@ class TestResult:
     failure_digest: str | None  # Captured failure evidence artifact.
 
 
-TestResult.__test__ = False
-
-
 @dataclass(frozen=True, slots=True)
 class TestReport:
     """Structured test outcome report from a test runner."""
@@ -330,9 +329,6 @@ class TestReport:
     results: tuple[TestResult, ...]  # Results keyed uniquely by test ID.
     completed: bool  # Runner reports all required execution completed.
     runner_error: str | None  # Collection, setup or runner diagnostic.
-
-
-TestReport.__test__ = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -675,9 +671,10 @@ def _convert_field(target_type: Any, val: Any) -> Any:
         if target_type is Any:
             return None
         origin = get_origin(target_type)
-        if origin is Union or origin is types.UnionType:
-            if type(None) in get_args(target_type):
-                return None
+        if (origin is Union or origin is types.UnionType) and type(None) in get_args(
+            target_type
+        ):
+            return None
         raise ValidationError(f"Expected {target_type}, got None.")
 
     # Unwrap Optional/Union annotations (e.g. datetime | None, TestReport | None)
@@ -788,4 +785,3 @@ def _convert_field(target_type: Any, val: Any) -> Any:
             return _instantiate_dataclass(cls_ref, val)
 
     return val
-

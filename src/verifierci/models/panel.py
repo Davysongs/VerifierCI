@@ -137,7 +137,9 @@ class AgentRun:
     budget: Mapping[str, float | None]  # Token, wall-time and monetary limits.
     patch_digest: str  # Generated diff artifact.
     trajectory_digest: str | None  # Original ATIF/native trace when available.
-    model_usage: Mapping[str, int] | None  # Observed billed usage, never inferred as zero.
+    model_usage: (
+        Mapping[str, int] | None
+    )  # Observed billed usage, never inferred as zero.
     exposure_record_digest: str  # Material available during generation.
     created_at: datetime  # Generation timestamp.
 

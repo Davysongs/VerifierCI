@@ -17,6 +17,8 @@ from .panel import (
     validate_membership,
 )
 from .protocol import (
+    SUPPORTED_SCHEMA_VERSIONS,
+    SUPPORTED_WIRE_VERSIONS,
     AcceptanceCell,
     AnalysisPlan,
     AuditOptions,
@@ -42,8 +44,6 @@ from .protocol import (
     TestReport,
     TestResult,
     TrainingExample,
-    SUPPORTED_SCHEMA_VERSIONS,
-    SUPPORTED_WIRE_VERSIONS,
     WorkerRequest,
     WorkerResponse,
     decode_record,
@@ -85,6 +85,8 @@ from .verifier import (
 )
 
 __all__ = [
+    "SUPPORTED_SCHEMA_VERSIONS",
+    "SUPPORTED_WIRE_VERSIONS",
     "AcceptanceCell",
     "AcceptanceMatrix",
     "Adjudication",
@@ -121,8 +123,6 @@ __all__ = [
     "ReviewAgreement",
     "ReviewVote",
     "SandboxPolicy",
-    "SUPPORTED_SCHEMA_VERSIONS",
-    "SUPPORTED_WIRE_VERSIONS",
     "Task",
     "TaskPin",
     "TelemetryEvent",

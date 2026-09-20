@@ -28,7 +28,9 @@ class CommandSpec:
 
     argv: tuple[str, ...]  # Resolved executable plus argument strings.
     cwd: str  # Validated working directory inside execution boundary.
-    env: Mapping[str, str]  # Explicit allowlist, never inherited controller environment.
+    env: Mapping[
+        str, str
+    ]  # Explicit allowlist, never inherited controller environment.
     stdin_digest: str | None  # Bounded input artifact when needed.
     timeout_seconds: int  # Deadline bounded by the audit and sandbox policies.
 

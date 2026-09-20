@@ -45,3 +45,7 @@ testpaths = ["tests"]
 addopts = "--strict-markers"
 markers = ["property", "requires_docker", "no_secrets_required", "trusted_fixture"]
 pythonpath = ["src"]
+filterwarnings = [
+  "ignore:cannot collect test class 'Test.*':pytest.PytestCollectionWarning",
+]
+

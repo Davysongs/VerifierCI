@@ -143,7 +143,9 @@ class MetricResult:
     ci_low: float | None  # Lower interval endpoint, null when not estimable.
     ci_high: float | None  # Upper interval endpoint, null when not estimable.
     analysis_plan_hash: str | None  # Plan controlling inference and multiplicity.
-    coverage: Mapping[str, int]  # Scheduled, usable, missing, flaky and unresolved counts.
+    coverage: Mapping[
+        str, int
+    ]  # Scheduled, usable, missing, flaky and unresolved counts.
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "coverage", MappingProxyType(dict(self.coverage)))
