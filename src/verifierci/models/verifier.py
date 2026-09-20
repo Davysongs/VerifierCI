@@ -35,7 +35,8 @@ class CommandSpec:
     timeout_seconds: int  # Deadline bounded by the audit and sandbox policies.
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "env", MappingProxyType(dict(self.env)))
+        if not isinstance(self.env, MappingProxyType):
+            object.__setattr__(self, "env", MappingProxyType(dict(self.env)))
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,12 +97,12 @@ def manifest_hash(manifest: VerifierManifest | dict[str, Any]) -> str:
 
 @dataclass(frozen=True, slots=True)
 class VerifierVersion:
-    """Versioned identity and manifest linkage for an auditing verifier."""
+    """A specific versioned verifier snapshot with its lineage and compatibility."""
 
-    verifier_key: str  # Logical verifier ID plus semantic version.
-    verifier_id: str  # Stable grader family name.
-    version: str  # Version changed when tests, commands or parsing change.
-    parent_key: str | None  # Previous version in its lineage.
+    verifier_key: str  # Canonical verifier key (e.g. pytest-runner@1.0.0).
+    verifier_id: str  # Stable verifier identity.
+    version: str  # Semantic version of verifier.
+    parent_key: str | None  # Predecessor verifier version key.
     manifest_hash: str  # Digest of its VerifierManifest.
     payload_digest: str  # Frozen test/checker bundle.
     compatible_contract_hashes: tuple[str, ...]  # Explicit supported contracts.
@@ -121,8 +122,8 @@ def validate_verifier(version: VerifierVersion, manifest: VerifierManifest) -> N
         raise ValidationError(
             f"manifest.manifest_hash '{manifest.manifest_hash}' does not match computed '{computed_manifest_hash}'.",
             details={
-                "declared_manifest_hash": manifest.manifest_hash,
-                "computed_manifest_hash": computed_manifest_hash,
+                "manifest_hash": manifest.manifest_hash,
+                "computed_hash": computed_manifest_hash,
             },
         )
     if version.manifest_hash != computed_manifest_hash:
@@ -135,7 +136,7 @@ def validate_verifier(version: VerifierVersion, manifest: VerifierManifest) -> N
         )
     if version.payload_digest != manifest.payload_digest:
         raise ValidationError(
-            f"version.payload_digest '{version.payload_digest}' does not match manifest '{manifest.payload_digest}'.",
+            f"version.payload_digest '{version.payload_digest}' does not match manifest.payload_digest '{manifest.payload_digest}'.",
             details={
                 "version_payload_digest": version.payload_digest,
                 "manifest_payload_digest": manifest.payload_digest,

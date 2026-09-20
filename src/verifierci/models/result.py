@@ -148,7 +148,8 @@ class MetricResult:
     ]  # Scheduled, usable, missing, flaky and unresolved counts.
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "coverage", MappingProxyType(dict(self.coverage)))
+        if not isinstance(self.coverage, MappingProxyType):
+            object.__setattr__(self, "coverage", MappingProxyType(dict(self.coverage)))
 
 
 @dataclass(frozen=True, slots=True)

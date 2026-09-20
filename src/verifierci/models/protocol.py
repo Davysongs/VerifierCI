@@ -44,8 +44,8 @@ from verifierci.models.task import (
 )
 from verifierci.models.verifier import CommandSpec, VerifierManifest, VerifierVersion
 
-SUPPORTED_WIRE_VERSIONS = {"1.0"}
 SUPPORTED_SCHEMA_VERSIONS = {"1.0", "1.0.0"}
+SUPPORTED_WIRE_VERSIONS = {"1.0"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,7 +96,9 @@ class ResourceUsage:
     bytes_written: int | None  # Measured output bytes within the attempt quota.
 
     def __post_init__(self) -> None:
-        if self.model_usage is not None:
+        if self.model_usage is not None and not isinstance(
+            self.model_usage, MappingProxyType
+        ):
             object.__setattr__(
                 self, "model_usage", MappingProxyType(dict(self.model_usage))
             )
@@ -165,13 +167,13 @@ class MetricTerm:
 
     task_key: str  # Task receiving one macro-average weight.
     numerator: int  # Eligible errors of the requested kind.
-    denominator: int  # Eligible cases for this task and label.
     excluded: Mapping[
         str, int
     ]  # Counts by unresolved, control, flaky or execution reason.
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "excluded", MappingProxyType(dict(self.excluded)))
+        if not isinstance(self.excluded, MappingProxyType):
+            object.__setattr__(self, "excluded", MappingProxyType(dict(self.excluded)))
 
 
 @dataclass(frozen=True, slots=True)
@@ -305,7 +307,8 @@ class AnalysisPlan:
     stopping_rule: str  # Sample size/rerun criteria fixed before outcome inspection.
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "budgets", MappingProxyType(dict(self.budgets)))
+        if not isinstance(self.budgets, MappingProxyType):
+            object.__setattr__(self, "budgets", MappingProxyType(dict(self.budgets)))
 
 
 @dataclass(frozen=True, slots=True)
@@ -432,7 +435,9 @@ class TelemetryEvent:
     pricing_version: str | None  # Identity of price assumptions.
 
     def __post_init__(self) -> None:
-        if self.model_usage is not None:
+        if self.model_usage is not None and not isinstance(
+            self.model_usage, MappingProxyType
+        ):
             object.__setattr__(
                 self, "model_usage", MappingProxyType(dict(self.model_usage))
             )
@@ -609,18 +614,22 @@ def decode_record(
     if not is_dataclass(cls):
         raise ValidationError(f"Target class {kind} is not a dataclass.")
 
+    # Support entity envelope {schema_version, kind, data} per SDD Section 4.3
     if (
         isinstance(data, dict)
         and "schema_version" in data
         and "kind" in data
         and "data" in data
-        and data.get("kind") == kind
-        and isinstance(data["data"], dict)
+        and len(data) == 3
     ):
-        schema_version = data["schema_version"]
-        if schema_version not in SUPPORTED_SCHEMA_VERSIONS:
+        schema_ver = data["schema_version"]
+        if schema_ver not in SUPPORTED_SCHEMA_VERSIONS:
             raise ValidationError(
-                f"Unsupported schema version '{schema_version}'. Supported versions: {sorted(SUPPORTED_SCHEMA_VERSIONS)}."
+                f"Unsupported schema version '{schema_ver}'. Supported versions: {sorted(SUPPORTED_SCHEMA_VERSIONS)}."
+            )
+        if data["kind"] != kind:
+            raise ValidationError(
+                f"Envelope kind '{data['kind']}' does not match requested kind '{kind}'."
             )
         data = data["data"]
 
@@ -633,19 +642,20 @@ def _instantiate_dataclass(cls: Any, data: Any) -> Any:
             f"Expected dict for dataclass {cls.__name__}, got {type(data).__name__}."
         )
 
+    # Validate schema_version if present in top-level entity or report
+    if "schema_version" in data:
+        schema_ver = data["schema_version"]
+        if schema_ver not in SUPPORTED_SCHEMA_VERSIONS:
+            raise ValidationError(
+                f"Unsupported schema version '{schema_ver}'. Supported versions: {sorted(SUPPORTED_SCHEMA_VERSIONS)}."
+            )
+
     allowed_fields = {f.name for f in fields(cls)}
     extra_fields = set(data) - allowed_fields
     if extra_fields:
         raise ValidationError(
             f"Unexpected field(s) for {cls.__name__}: {sorted(extra_fields)}."
         )
-
-    if "schema_version" in data:
-        schema_version = data["schema_version"]
-        if schema_version not in SUPPORTED_SCHEMA_VERSIONS:
-            raise ValidationError(
-                f"Unsupported schema version '{schema_version}'. Supported versions: {sorted(SUPPORTED_SCHEMA_VERSIONS)}."
-            )
 
     try:
         field_types = get_type_hints(cls, localns=_KIND_REGISTRY)
@@ -667,41 +677,38 @@ def _instantiate_dataclass(cls: Any, data: Any) -> Any:
 
 
 def _convert_field(target_type: Any, val: Any) -> Any:
+    origin = get_origin(target_type)
+
     if val is None:
         if target_type is Any:
             return None
-        origin = get_origin(target_type)
-        if (origin is Union or origin is types.UnionType) and type(None) in get_args(
-            target_type
-        ):
-            return None
-        raise ValidationError(f"Expected {target_type}, got None.")
+        if origin is Union or origin is types.UnionType:
+            union_args = get_args(target_type)
+            if type(None) in union_args:
+                return None
+        raise ValidationError(
+            f"None is not allowed for non-optional type {target_type}."
+        )
 
     # Unwrap Optional/Union annotations (e.g. datetime | None, TestReport | None)
-    origin = get_origin(target_type)
     if origin is Union or origin is types.UnionType:
-        union_args = [a for a in get_args(target_type) if a is not type(None)]
-        if len(union_args) == 1:
-            target_type = union_args[0]
-            origin = get_origin(target_type)
-        else:
-            for arg in union_args:
-                try:
-                    return _convert_field(arg, val)
-                except ValidationError:
-                    pass
-            raise ValidationError(
-                f"Value '{val}' does not match any allowed type in {target_type}."
-            )
-
-    if target_type is Any:
-        return val
+        non_none_args = tuple(a for a in get_args(target_type) if a is not type(None))
+        if len(non_none_args) == 1:
+            return _convert_field(non_none_args[0], val)
+        for alt_type in non_none_args:
+            try:
+                return _convert_field(alt_type, val)
+            except ValidationError:
+                continue
+        raise ValidationError(
+            f"Value '{val}' does not match any type in union {non_none_args}."
+        )
 
     if origin is Literal:
-        allowed = get_args(target_type)
-        if val not in allowed:
+        literal_values = get_args(target_type)
+        if val not in literal_values:
             raise ValidationError(
-                f"Value '{val}' is not one of allowed literals {allowed}."
+                f"Value '{val}' is not one of allowed literals: {literal_values}."
             )
         return val
 
@@ -718,12 +725,11 @@ def _convert_field(target_type: Any, val: Any) -> Any:
     if target_type is float:
         if not isinstance(val, (int, float)) or isinstance(val, bool):
             raise ValidationError(f"Expected float, got {type(val).__name__}.")
-        f_val = float(val)
-        if math.isnan(f_val) or math.isinf(f_val):
+        if math.isnan(val) or math.isinf(val):
             raise ValidationError(
-                "Non-finite float values are prohibited in canonical records."
+                "Non-finite float values are prohibited in canonical JSON."
             )
-        return f_val
+        return float(val)
 
     if target_type is str:
         if not isinstance(val, str):
@@ -733,7 +739,6 @@ def _convert_field(target_type: Any, val: Any) -> Any:
     if target_type is datetime:
         if isinstance(val, str):
             try:
-                # Handle RFC 3339 format, e.g. 2026-09-18T16:00:00Z
                 clean_str = val.replace("Z", "+00:00")
                 dt = datetime.fromisoformat(clean_str)
                 if dt.tzinfo is None:
@@ -741,21 +746,21 @@ def _convert_field(target_type: Any, val: Any) -> Any:
                 return dt
             except Exception as exc:
                 raise ValidationError(f"Cannot parse datetime '{val}': {exc}") from exc
-        elif isinstance(val, datetime):
+        if isinstance(val, datetime):
             if val.tzinfo is None:
-                return val.replace(tzinfo=UTC)
+                raise ValidationError("Datetime must be timezone-aware.")
             return val
-        raise ValidationError(f"Expected datetime, got {type(val).__name__}.")
+        raise ValidationError(f"Expected datetime string, got {type(val).__name__}.")
 
     # If target_type is a tuple
     if origin is tuple:
-        tuple_args = get_args(target_type)
         if not isinstance(val, (list, tuple)):
             raise ValidationError(f"Expected tuple/list, got {type(val).__name__}.")
-        if tuple_args and tuple_args[-1] is Ellipsis:
-            elem_type = tuple_args[0]
-            return tuple(_convert_field(elem_type, x) for x in val)
-        elif tuple_args:
+        tuple_args = get_args(target_type)
+        if tuple_args:
+            if tuple_args[-1] is Ellipsis:
+                elem_type = tuple_args[0]
+                return tuple(_convert_field(elem_type, x) for x in val)
             if len(val) != len(tuple_args):
                 raise ValidationError(
                     f"Expected tuple of length {len(tuple_args)}, got {len(val)}."
@@ -763,25 +768,22 @@ def _convert_field(target_type: Any, val: Any) -> Any:
             return tuple(_convert_field(t, x) for t, x in zip(tuple_args, val))
         return tuple(val)
 
+    # If target_type is a Mapping or dict
     if origin in (dict, Mapping) or target_type in (dict, Mapping):
         if not isinstance(val, (dict, Mapping)):
-            raise ValidationError(f"Expected mapping, got {type(val).__name__}.")
+            raise ValidationError(f"Expected dict/mapping, got {type(val).__name__}.")
         map_args = get_args(target_type)
-        if map_args and len(map_args) == 2:
+        if len(map_args) == 2:
             k_type, v_type = map_args
             converted = {
                 _convert_field(k_type, k): _convert_field(v_type, v)
                 for k, v in val.items()
             }
-            return MappingProxyType(converted)
-        return MappingProxyType(dict(val))
+        else:
+            converted = dict(val)
+        return MappingProxyType(converted)
 
     if isinstance(target_type, type) and is_dataclass(target_type):
         return _instantiate_dataclass(target_type, val)
-
-    if isinstance(target_type, str) and target_type in _KIND_REGISTRY:
-        cls_ref = _KIND_REGISTRY[target_type]
-        if is_dataclass(cls_ref):
-            return _instantiate_dataclass(cls_ref, val)
 
     return val

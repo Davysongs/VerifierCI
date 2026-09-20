@@ -118,11 +118,12 @@ class PatchPanelMembership:
     ]  # Verifier-key to expected control observation.
 
     def __post_init__(self) -> None:
-        object.__setattr__(
-            self,
-            "expected_control_outcomes",
-            MappingProxyType(dict(self.expected_control_outcomes)),
-        )
+        if not isinstance(self.expected_control_outcomes, MappingProxyType):
+            object.__setattr__(
+                self,
+                "expected_control_outcomes",
+                MappingProxyType(dict(self.expected_control_outcomes)),
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -144,8 +145,11 @@ class AgentRun:
     created_at: datetime  # Generation timestamp.
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "budget", MappingProxyType(dict(self.budget)))
-        if self.model_usage is not None:
+        if not isinstance(self.budget, MappingProxyType):
+            object.__setattr__(self, "budget", MappingProxyType(dict(self.budget)))
+        if self.model_usage is not None and not isinstance(
+            self.model_usage, MappingProxyType
+        ):
             object.__setattr__(
                 self, "model_usage", MappingProxyType(dict(self.model_usage))
             )

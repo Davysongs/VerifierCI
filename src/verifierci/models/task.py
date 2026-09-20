@@ -257,8 +257,8 @@ def validate_task(task: Task, contract: Contract) -> None:
         raise ValidationError(
             f"contract.contract_hash '{contract.contract_hash}' does not match computed '{computed_contract_hash}'.",
             details={
-                "declared_contract_hash": contract.contract_hash,
-                "computed_contract_hash": computed_contract_hash,
+                "contract_hash": contract.contract_hash,
+                "computed_hash": computed_contract_hash,
             },
         )
     if task.contract_hash != contract.contract_hash:
