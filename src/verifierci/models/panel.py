@@ -7,9 +7,10 @@ All domain entities are immutable (@dataclass(frozen=True, slots=True)).
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Literal
 
 from verifierci.errors import ValidationError
@@ -112,9 +113,16 @@ class PatchPanelMembership:
     case_id: str  # Member patch.
     adjudication_id: str  # Exact decision used by this panel.
     ordinal: int  # Stable display order, excluded from metric meaning.
-    expected_control_outcomes: dict[
+    expected_control_outcomes: Mapping[
         str, str
     ]  # Verifier-key to expected control observation.
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "expected_control_outcomes",
+            MappingProxyType(dict(self.expected_control_outcomes)),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,12 +134,19 @@ class AgentRun:
     model_identifier: str  # Provider/model/snapshot from actual generation.
     prompt_digest: str  # Exact prompt identity, restricted when necessary.
     config_hash: str  # Sampling, tool and reasoning configuration identity.
-    budget: dict[str, float | None]  # Token, wall-time and monetary limits.
+    budget: Mapping[str, float | None]  # Token, wall-time and monetary limits.
     patch_digest: str  # Generated diff artifact.
     trajectory_digest: str | None  # Original ATIF/native trace when available.
-    model_usage: dict[str, int] | None  # Observed billed usage, never inferred as zero.
+    model_usage: Mapping[str, int] | None  # Observed billed usage, never inferred as zero.
     exposure_record_digest: str  # Material available during generation.
     created_at: datetime  # Generation timestamp.
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "budget", MappingProxyType(dict(self.budget)))
+        if self.model_usage is not None:
+            object.__setattr__(
+                self, "model_usage", MappingProxyType(dict(self.model_usage))
+            )
 
 
 def panel_digest(

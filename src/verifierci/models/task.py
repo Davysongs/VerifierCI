@@ -12,6 +12,7 @@ import hashlib
 import json
 import math
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, fields, is_dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
@@ -42,13 +43,15 @@ def canonical_repr(value: Any) -> Any:
         if value.tzinfo is None:
             raise ValidationError("Datetime must be timezone-aware.")
         utc_dt = value.astimezone(UTC)
+        if utc_dt.microsecond:
+            return utc_dt.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
         return utc_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
     if is_dataclass(value):
         res: dict[str, Any] = {}
         for f in fields(value):
             res[f.name] = canonical_repr(getattr(value, f.name))
         return res
-    if isinstance(value, dict):
+    if isinstance(value, Mapping):
         return {str(k): canonical_repr(v) for k, v in value.items()}
     if isinstance(value, (list, tuple)):
         return [canonical_repr(v) for v in value]
@@ -248,6 +251,15 @@ def validate_task(task: Task, contract: Contract) -> None:
         raise ValidationError(
             f"task.task_id '{task.task_id}' does not match contract.task_id '{contract.task_id}'.",
             details={"task_id": task.task_id, "contract_task_id": contract.task_id},
+        )
+    computed_contract_hash = contract_hash(contract)
+    if contract.contract_hash != computed_contract_hash:
+        raise ValidationError(
+            f"contract.contract_hash '{contract.contract_hash}' does not match computed '{computed_contract_hash}'.",
+            details={
+                "declared_contract_hash": contract.contract_hash,
+                "computed_contract_hash": computed_contract_hash,
+            },
         )
     if task.contract_hash != contract.contract_hash:
         raise ValidationError(

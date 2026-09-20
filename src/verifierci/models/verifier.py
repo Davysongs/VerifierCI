@@ -9,8 +9,10 @@ from __future__ import annotations
 import hashlib
 import re
 import sqlite3
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
+from types import MappingProxyType
 from typing import Any, Literal
 
 from verifierci.errors import ValidationError
@@ -26,9 +28,12 @@ class CommandSpec:
 
     argv: tuple[str, ...]  # Resolved executable plus argument strings.
     cwd: str  # Validated working directory inside execution boundary.
-    env: dict[str, str]  # Explicit allowlist, never inherited controller environment.
+    env: Mapping[str, str]  # Explicit allowlist, never inherited controller environment.
     stdin_digest: str | None  # Bounded input artifact when needed.
     timeout_seconds: int  # Deadline bounded by the audit and sandbox policies.
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "env", MappingProxyType(dict(self.env)))
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,12 +114,29 @@ def validate_verifier(version: VerifierVersion, manifest: VerifierManifest) -> N
             f"verifier_key '{version.verifier_key}' does not match expected '{expected_key}'.",
             details={"verifier_key": version.verifier_key, "expected": expected_key},
         )
-    if version.manifest_hash != manifest.manifest_hash:
+    computed_manifest_hash = manifest_hash(manifest)
+    if manifest.manifest_hash != computed_manifest_hash:
+        raise ValidationError(
+            f"manifest.manifest_hash '{manifest.manifest_hash}' does not match computed '{computed_manifest_hash}'.",
+            details={
+                "declared_manifest_hash": manifest.manifest_hash,
+                "computed_manifest_hash": computed_manifest_hash,
+            },
+        )
+    if version.manifest_hash != computed_manifest_hash:
         raise ValidationError(
             f"version.manifest_hash '{version.manifest_hash}' does not match manifest '{manifest.manifest_hash}'.",
             details={
                 "version_manifest_hash": version.manifest_hash,
                 "manifest_hash": manifest.manifest_hash,
+            },
+        )
+    if version.payload_digest != manifest.payload_digest:
+        raise ValidationError(
+            f"version.payload_digest '{version.payload_digest}' does not match manifest '{manifest.payload_digest}'.",
+            details={
+                "version_payload_digest": version.payload_digest,
+                "manifest_payload_digest": manifest.payload_digest,
             },
         )
     if manifest.timeout_seconds <= 0:

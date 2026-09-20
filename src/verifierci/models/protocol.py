@@ -8,9 +8,12 @@ or schema-validated TypedDicts. No pickle or dynamic code execution is permitted
 from __future__ import annotations
 
 import json
+import math
 import types
+from collections.abc import Mapping
 from dataclasses import dataclass, fields, is_dataclass
 from datetime import UTC, datetime
+from types import MappingProxyType
 from typing import Any, Literal, TypedDict, Union, get_args, get_origin, get_type_hints
 
 from verifierci.errors import ValidationError
@@ -42,6 +45,7 @@ from verifierci.models.task import (
 from verifierci.models.verifier import CommandSpec, VerifierManifest, VerifierVersion
 
 SUPPORTED_WIRE_VERSIONS = {"1.0"}
+SUPPORTED_SCHEMA_VERSIONS = {"1.0", "1.0.0"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,10 +90,16 @@ class ResourceUsage:
     allocated_cpu: float | None  # Declared CPU capacity, not measured utilisation.
     cpu_seconds: float | None  # Measured cgroup or process CPU usage.
     peak_memory: int | None  # Peak resident/cgroup bytes when available.
-    model_usage: dict[str, int] | None  # Observed input/output token counts.
+    model_usage: Mapping[str, int] | None  # Observed input/output token counts.
     estimated_cost: str | None  # Decimal monetary estimate, not a binary float.
     pricing_version: str | None  # Price-source identity or null.
     bytes_written: int | None  # Measured output bytes within the attempt quota.
+
+    def __post_init__(self) -> None:
+        if self.model_usage is not None:
+            object.__setattr__(
+                self, "model_usage", MappingProxyType(dict(self.model_usage))
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -156,9 +166,12 @@ class MetricTerm:
     task_key: str  # Task receiving one macro-average weight.
     numerator: int  # Eligible errors of the requested kind.
     denominator: int  # Eligible cases for this task and label.
-    excluded: dict[
+    excluded: Mapping[
         str, int
     ]  # Counts by unresolved, control, flaky or execution reason.
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "excluded", MappingProxyType(dict(self.excluded)))
 
 
 @dataclass(frozen=True, slots=True)
@@ -284,10 +297,13 @@ class AnalysisPlan:
     alpha: float  # Family-wise significance level, normally 0.05.
     bootstrap_draws: int  # Default 10000 paired hierarchical draws.
     seed: int  # Random generator seed fixed before analysis.
-    budgets: dict[str, float]  # Test runtime, generation and review budgets by method.
+    budgets: Mapping[str, float]  # Test runtime, generation and review budgets by method.
     exclusions: tuple[str, ...]  # Prespecified missingness and admission rules.
     secondary_hypotheses: tuple[str, ...]  # Confirmatory family for Holm correction.
     stopping_rule: str  # Sample size/rerun criteria fixed before outcome inspection.
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "budgets", MappingProxyType(dict(self.budgets)))
 
 
 @dataclass(frozen=True, slots=True)
@@ -302,6 +318,9 @@ class TestResult:
     failure_digest: str | None  # Captured failure evidence artifact.
 
 
+TestResult.__test__ = False
+
+
 @dataclass(frozen=True, slots=True)
 class TestReport:
     """Structured test outcome report from a test runner."""
@@ -311,6 +330,9 @@ class TestReport:
     results: tuple[TestResult, ...]  # Results keyed uniquely by test ID.
     completed: bool  # Runner reports all required execution completed.
     runner_error: str | None  # Collection, setup or runner diagnostic.
+
+
+TestReport.__test__ = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -409,9 +431,15 @@ class TelemetryEvent:
     allocated_cpu: float | None  # CPU allocation.
     cpu_seconds: float | None  # Actual measured CPU time.
     peak_memory: int | None  # Peak memory bytes.
-    model_usage: dict[str, int] | None  # Actual usage only.
+    model_usage: Mapping[str, int] | None  # Actual usage only.
     estimated_cost: str | None  # Decimal estimated cost.
     pricing_version: str | None  # Identity of price assumptions.
+
+    def __post_init__(self) -> None:
+        if self.model_usage is not None:
+            object.__setattr__(
+                self, "model_usage", MappingProxyType(dict(self.model_usage))
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -585,6 +613,21 @@ def decode_record(
     if not is_dataclass(cls):
         raise ValidationError(f"Target class {kind} is not a dataclass.")
 
+    if (
+        isinstance(data, dict)
+        and "schema_version" in data
+        and "kind" in data
+        and "data" in data
+        and data.get("kind") == kind
+        and isinstance(data["data"], dict)
+    ):
+        schema_version = data["schema_version"]
+        if schema_version not in SUPPORTED_SCHEMA_VERSIONS:
+            raise ValidationError(
+                f"Unsupported schema version '{schema_version}'. Supported versions: {sorted(SUPPORTED_SCHEMA_VERSIONS)}."
+            )
+        data = data["data"]
+
     return _instantiate_dataclass(cls, data)
 
 
@@ -600,6 +643,13 @@ def _instantiate_dataclass(cls: Any, data: Any) -> Any:
         raise ValidationError(
             f"Unexpected field(s) for {cls.__name__}: {sorted(extra_fields)}."
         )
+
+    if "schema_version" in data:
+        schema_version = data["schema_version"]
+        if schema_version not in SUPPORTED_SCHEMA_VERSIONS:
+            raise ValidationError(
+                f"Unsupported schema version '{schema_version}'. Supported versions: {sorted(SUPPORTED_SCHEMA_VERSIONS)}."
+            )
 
     try:
         field_types = get_type_hints(cls, localns=_KIND_REGISTRY)
@@ -622,14 +672,66 @@ def _instantiate_dataclass(cls: Any, data: Any) -> Any:
 
 def _convert_field(target_type: Any, val: Any) -> Any:
     if val is None:
-        return None
+        if target_type is Any:
+            return None
+        origin = get_origin(target_type)
+        if origin is Union or origin is types.UnionType:
+            if type(None) in get_args(target_type):
+                return None
+        raise ValidationError(f"Expected {target_type}, got None.")
 
     # Unwrap Optional/Union annotations (e.g. datetime | None, TestReport | None)
     origin = get_origin(target_type)
     if origin is Union or origin is types.UnionType:
         union_args = [a for a in get_args(target_type) if a is not type(None)]
         if len(union_args) == 1:
-            return _convert_field(union_args[0], val)
+            target_type = union_args[0]
+            origin = get_origin(target_type)
+        else:
+            for arg in union_args:
+                try:
+                    return _convert_field(arg, val)
+                except ValidationError:
+                    pass
+            raise ValidationError(
+                f"Value '{val}' does not match any allowed type in {target_type}."
+            )
+
+    if target_type is Any:
+        return val
+
+    if origin is Literal:
+        allowed = get_args(target_type)
+        if val not in allowed:
+            raise ValidationError(
+                f"Value '{val}' is not one of allowed literals {allowed}."
+            )
+        return val
+
+    if target_type is bool:
+        if not isinstance(val, bool):
+            raise ValidationError(f"Expected bool, got {type(val).__name__}.")
+        return val
+
+    if target_type is int:
+        if not isinstance(val, int) or isinstance(val, bool):
+            raise ValidationError(f"Expected int, got {type(val).__name__}.")
+        return val
+
+    if target_type is float:
+        if not isinstance(val, (int, float)) or isinstance(val, bool):
+            raise ValidationError(f"Expected float, got {type(val).__name__}.")
+        f_val = float(val)
+        if math.isnan(f_val) or math.isinf(f_val):
+            raise ValidationError(
+                "Non-finite float values are prohibited in canonical records."
+            )
+        return f_val
+
+    if target_type is str:
+        if not isinstance(val, str):
+            raise ValidationError(f"Expected str, got {type(val).__name__}.")
+        return val
 
     if target_type is datetime:
         if isinstance(val, str):
@@ -642,7 +744,11 @@ def _convert_field(target_type: Any, val: Any) -> Any:
                 return dt
             except Exception as exc:
                 raise ValidationError(f"Cannot parse datetime '{val}': {exc}") from exc
-        return val
+        elif isinstance(val, datetime):
+            if val.tzinfo is None:
+                return val.replace(tzinfo=UTC)
+            return val
+        raise ValidationError(f"Expected datetime, got {type(val).__name__}.")
 
     # If target_type is a tuple
     if origin is tuple:
@@ -652,9 +758,34 @@ def _convert_field(target_type: Any, val: Any) -> Any:
         if tuple_args and tuple_args[-1] is Ellipsis:
             elem_type = tuple_args[0]
             return tuple(_convert_field(elem_type, x) for x in val)
+        elif tuple_args:
+            if len(val) != len(tuple_args):
+                raise ValidationError(
+                    f"Expected tuple of length {len(tuple_args)}, got {len(val)}."
+                )
+            return tuple(_convert_field(t, x) for t, x in zip(tuple_args, val))
         return tuple(val)
+
+    if origin in (dict, Mapping) or target_type in (dict, Mapping):
+        if not isinstance(val, (dict, Mapping)):
+            raise ValidationError(f"Expected mapping, got {type(val).__name__}.")
+        map_args = get_args(target_type)
+        if map_args and len(map_args) == 2:
+            k_type, v_type = map_args
+            converted = {
+                _convert_field(k_type, k): _convert_field(v_type, v)
+                for k, v in val.items()
+            }
+            return MappingProxyType(converted)
+        return MappingProxyType(dict(val))
 
     if isinstance(target_type, type) and is_dataclass(target_type):
         return _instantiate_dataclass(target_type, val)
 
+    if isinstance(target_type, str) and target_type in _KIND_REGISTRY:
+        cls_ref = _KIND_REGISTRY[target_type]
+        if is_dataclass(cls_ref):
+            return _instantiate_dataclass(cls_ref, val)
+
     return val
+

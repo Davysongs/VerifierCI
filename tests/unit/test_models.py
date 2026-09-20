@@ -13,13 +13,23 @@ import pytest
 
 from verifierci.errors import ValidationError
 from verifierci.models import (
+    SUPPORTED_SCHEMA_VERSIONS,
+    AgentRun,
+    AnalysisPlan,
+    CommandSpec,
     Contract,
     EvaluationAttempt,
+    MetricResult,
+    MetricTerm,
     PatchCase,
+    PatchPanelMembership,
     Requirement,
     ResourceUsage,
     ReviewVote,
     Task,
+    TelemetryEvent,
+    TestReport,
+    TestResult,
     VerifierManifest,
     VerifierVersion,
     canonical_bytes,
@@ -722,3 +732,264 @@ def test_register_verifier_stub_raises_not_implemented():
         match="Phase 1 stub: verifier registry persistence is not implemented yet.",
     ):
         register_verifier(conn, version, manifest)
+
+
+def test_canonical_json_timestamp_microseconds():
+    dt_with_micros = datetime(2026, 9, 18, 12, 0, 0, 123456, tzinfo=UTC)
+    dt_with_diff_micros = datetime(2026, 9, 18, 12, 0, 0, 654321, tzinfo=UTC)
+    dt_zero_micros = datetime(2026, 9, 18, 12, 0, 0, 0, tzinfo=UTC)
+
+    b1 = canonical_bytes({"t": dt_with_micros})
+    b2 = canonical_bytes({"t": dt_with_diff_micros})
+    b3 = canonical_bytes({"t": dt_zero_micros})
+
+    assert b1 != b2
+    assert b'"t":"2026-09-18T12:00:00.123456Z"' in b1
+    assert b'"t":"2026-09-18T12:00:00.654321Z"' in b2
+    assert b'"t":"2026-09-18T12:00:00Z"' in b3
+
+
+def test_frozen_dataclass_mapping_immutability():
+    # PatchPanelMembership
+    input_map = {"v1": "pass"}
+    membership = PatchPanelMembership(
+        panel_key="p@1",
+        case_id="case-1",
+        adjudication_id="adj-1",
+        ordinal=0,
+        expected_control_outcomes=input_map,
+    )
+    # Cannot mutate mapping directly
+    with pytest.raises(TypeError):
+        membership.expected_control_outcomes["v1"] = "fail"  # type: ignore[index]
+    # Mutating original input does not mutate membership
+    input_map["v1"] = "mutated"
+    assert membership.expected_control_outcomes["v1"] == "pass"
+
+    # AgentRun
+    budget_map = {"tokens": 100.0}
+    usage_map = {"tokens": 50}
+    run = AgentRun(
+        agent_run_id="run-1",
+        agent_version="v1",
+        model_identifier="model-1",
+        prompt_digest="0" * 64,
+        config_hash="c" * 64,
+        budget=budget_map,
+        patch_digest="p" * 64,
+        trajectory_digest=None,
+        model_usage=usage_map,
+        exposure_record_digest="e" * 64,
+        created_at=datetime.now(UTC),
+    )
+    with pytest.raises(TypeError):
+        run.budget["tokens"] = 200.0  # type: ignore[index]
+    with pytest.raises(TypeError):
+        assert run.model_usage is not None
+        run.model_usage["tokens"] = 99  # type: ignore[index]
+
+    # CommandSpec
+    env_map = {"PATH": "/bin"}
+    cs = CommandSpec(
+        argv=("echo", "hi"),
+        cwd="/tmp",
+        env=env_map,
+        stdin_digest=None,
+        timeout_seconds=30,
+    )
+    with pytest.raises(TypeError):
+        cs.env["PATH"] = "/usr/bin"  # type: ignore[index]
+
+    # MetricResult
+    coverage_map = {"usable": 10}
+    mr = MetricResult(
+        metric_id="met-1",
+        matrix_id="mat-1",
+        name="IAR",
+        definition_version="1.0",
+        verifier_key=None,
+        cohort="all",
+        value=0.5,
+        numerator=5,
+        denominator=10,
+        task_terms=(),
+        ci_low=None,
+        ci_high=None,
+        analysis_plan_hash=None,
+        coverage=coverage_map,
+    )
+    with pytest.raises(TypeError):
+        mr.coverage["usable"] = 20  # type: ignore[index]
+
+
+def test_validate_task_recomputes_contract_hash():
+    req = _sample_requirement()
+    contract = _sample_contract((req.requirement_hash,))
+    task = Task(
+        task_key="task-1@1.0.0",
+        task_id="task-1",
+        version="1.0.0",
+        statement="Implement retry",
+        adapter="local",
+        contract_hash=contract.contract_hash,
+        snapshot_digest="0" * 64,
+        environment_id="env-fixture-1",
+        licence="Apache-2.0",
+        provenance="repo",
+        eligibility="eligible",
+        notes="",
+        created_at=datetime.now(UTC),
+    )
+    # Valid contract passes
+    validate_task(task, contract)
+
+    # Contract with declared contract_hash differing from computed hash
+    tampered_contract = Contract(
+        contract_hash="t" * 64,
+        task_id="task-1",
+        version="1.0.0",
+        requirement_hashes=(req.requirement_hash,),
+        allowed_variation="standard",
+        unresolved_questions=(),
+        evidence_digests=("b" * 64,),
+        created_at=datetime(2026, 9, 18, 12, 0, 0, tzinfo=UTC),
+    )
+    with pytest.raises(ValidationError, match="does not match computed"):
+        validate_task(task, tampered_contract)
+
+
+def test_validate_verifier_recomputes_manifest_hash_and_payload_digest():
+    m_dict = {
+        "mode": "compatibility",
+        "command": ("pytest", "-q"),
+        "build_command": (),
+        "expected_collection": ("test_a",),
+        "parser_id": "pytest-report-v1",
+        "report_path": "report.json",
+        "payload_digest": "d" * 64,
+        "allowed_edit_paths": ("src/",),
+        "required_pass_ids": ("test_a",),
+        "permitted_skips": (),
+        "timeout_seconds": 60,
+    }
+    m_hash = manifest_hash(m_dict)
+    manifest = VerifierManifest(manifest_hash=m_hash, **m_dict)  # type: ignore[arg-type]
+    version = VerifierVersion(
+        verifier_key="v-1@1.0.0",
+        verifier_id="v-1",
+        version="1.0.0",
+        parent_key=None,
+        manifest_hash=m_hash,
+        payload_digest="d" * 64,
+        compatible_contract_hashes=("c" * 64,),
+        created_at=datetime(2026, 9, 18, 16, 0, 0, tzinfo=UTC),
+    )
+    validate_verifier(version, manifest)
+
+    # Tampered manifest_hash
+    tampered_manifest = VerifierManifest(manifest_hash="x" * 64, **m_dict)  # type: ignore[arg-type]
+    with pytest.raises(ValidationError, match="does not match computed"):
+        validate_verifier(version, tampered_manifest)
+
+    # Mismatched payload_digest
+    mismatched_version = VerifierVersion(
+        verifier_key="v-1@1.0.0",
+        verifier_id="v-1",
+        version="1.0.0",
+        parent_key=None,
+        manifest_hash=m_hash,
+        payload_digest="e" * 64,
+        compatible_contract_hashes=("c" * 64,),
+        created_at=datetime(2026, 9, 18, 16, 0, 0, tzinfo=UTC),
+    )
+    with pytest.raises(ValidationError, match="version.payload_digest"):
+        validate_verifier(mismatched_version, manifest)
+
+
+def test_decode_record_strict_validation():
+    # 1. Non-optional field given None
+    req_dict = {
+        "requirement_hash": "r" * 64,
+        "requirement_id": "REQ-1",
+        "text": None,  # text is str (non-optional)
+        "source_kind": "explicit",
+        "evidence_digests": ["a" * 64],
+        "source_locator": "spec.md",
+        "allowed_variation": "none",
+    }
+    with pytest.raises(ValidationError, match="None"):
+        decode_record("Requirement", json.dumps(req_dict).encode("utf-8"))
+
+    # 2. Invalid Literal value
+    task_dict = {
+        "task_key": "t-1@1.0.0",
+        "task_id": "t-1",
+        "version": "1.0.0",
+        "statement": "Implement retry",
+        "adapter": "local",
+        "contract_hash": "c" * 64,
+        "snapshot_digest": "s" * 64,
+        "environment_id": "env-1",
+        "licence": "Apache-2.0",
+        "provenance": "repo",
+        "eligibility": "invalid_eligibility_value",  # literal: eligible, excluded, pending
+        "notes": "",
+        "created_at": "2026-09-18T16:00:00Z",
+    }
+    with pytest.raises(ValidationError, match="not one of allowed literals"):
+        decode_record("Task", json.dumps(task_dict).encode("utf-8"))
+
+    # 3. Unsupported schema version in record
+    report_dict = {
+        "schema_version": "99.0.0",
+        "collected_ids": ["t1"],
+        "results": [],
+        "completed": True,
+        "runner_error": None,
+    }
+    with pytest.raises(ValidationError, match="Unsupported schema version"):
+        decode_record("TestReport", json.dumps(report_dict).encode("utf-8"))
+
+    # 4. Envelope decoding with valid and invalid schema_version
+    envelope_invalid = {
+        "schema_version": "99.0.0",
+        "kind": "Requirement",
+        "data": {
+            "requirement_id": "REQ-1",
+            "text": "Must retry",
+            "source_kind": "explicit",
+            "evidence_digests": ["a" * 64],
+            "source_locator": "spec.md",
+            "allowed_variation": "none",
+        },
+    }
+    with pytest.raises(ValidationError, match="Unsupported schema version"):
+        decode_record("Requirement", json.dumps(envelope_invalid).encode("utf-8"))
+
+    envelope_valid = {
+        "schema_version": "1.0.0",
+        "kind": "Requirement",
+        "data": {
+            "requirement_id": "REQ-1",
+            "text": "Must retry",
+            "source_kind": "explicit",
+            "evidence_digests": ["a" * 64],
+            "source_locator": "spec.md",
+            "allowed_variation": "none",
+        },
+    }
+    decoded = decode_record("Requirement", json.dumps(envelope_valid).encode("utf-8"))
+    assert isinstance(decoded, Requirement)
+    assert decoded.text == "Must retry"
+
+    # 5. Invalid primitive types
+    bad_type_report = {
+        "schema_version": "1.0",
+        "collected_ids": ["t1"],
+        "results": [],
+        "completed": "not_a_bool",  # bool expected
+        "runner_error": None,
+    }
+    with pytest.raises(ValidationError, match="Expected bool"):
+        decode_record("TestReport", json.dumps(bad_type_report).encode("utf-8"))
+
