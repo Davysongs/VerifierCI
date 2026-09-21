@@ -698,8 +698,6 @@ def _convert_field(target_type: Any, val: Any) -> Any:
     origin = get_origin(target_type)
 
     if val is None:
-        if target_type is Any:
-            return None
         if origin is Union or origin is types.UnionType:
             union_args = get_args(target_type)
             if type(None) in union_args:
@@ -743,7 +741,6 @@ def _convert_field(target_type: Any, val: Any) -> Any:
     if target_type is float:
         if not isinstance(val, (int, float)) or isinstance(val, bool):
             raise ValidationError(f"Expected float, got {type(val).__name__}.")
-        if math.isnan(val) or math.isinf(val):
         try:
             f_val = float(val)
         except (OverflowError, ValueError) as exc:
@@ -752,7 +749,6 @@ def _convert_field(target_type: Any, val: Any) -> Any:
             raise ValidationError(
                 "Non-finite float values are prohibited in canonical JSON."
             )
-        return float(val)
         return f_val
 
     if target_type is str:
@@ -794,7 +790,6 @@ def _convert_field(target_type: Any, val: Any) -> Any:
                     f"Expected tuple of length {len(tuple_args)}, got {len(val)}."
                 )
             return tuple(_convert_field(t, x) for t, x in zip(tuple_args, val))
-        return tuple(val)
         return tuple(_convert_field(Any, x) for x in val)
 
     # If target_type is a Mapping or dict
@@ -809,7 +804,6 @@ def _convert_field(target_type: Any, val: Any) -> Any:
                 for k, v in val.items()
             }
         else:
-            converted = dict(val)
             converted = {
                 _convert_field(Any, k): _convert_field(Any, v) for k, v in val.items()
             }
