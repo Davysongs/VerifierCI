@@ -13,8 +13,10 @@ import os
 import shutil
 import signal
 import subprocess
+import threading
 import time
 from pathlib import Path
+from typing import Any
 
 from verifierci.errors import (
     ErrorCode,
@@ -43,8 +45,10 @@ def validate_patch(diff: bytes, allowed_paths: tuple[str, ...]) -> None:
             code=ErrorCode.PROTECTION_ERROR.value,
         )
 
+    mode_prefixes = ("new file mode ", "old mode ", "new mode ", "deleted file mode ")
     for line in diff_text.splitlines():
-        if "120000" in line:
+        stripped = line.strip()
+        if stripped.startswith(mode_prefixes) and stripped.endswith("120000"):
             raise ProtectionError(
                 "Symlink creation or modification in patches is prohibited.",
                 code=ErrorCode.PROTECTION_ERROR.value,
@@ -223,12 +227,26 @@ def execute(
     attempt_id = job.attempt_id or "unknown"
     start_time = time.monotonic()
 
-    clean_env = dict(os.environ)
-    if env:
-        clean_env.update(env)
+    clean_env: dict[str, str] = {
+        "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
+        "LANG": os.environ.get("LANG", "C.UTF-8"),
+        "LC_ALL": "C.UTF-8",
+        "PYTHONUNBUFFERED": "1",
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
+        "HOME": os.environ.get("HOME", str(workspace)),
+        "TMPDIR": os.environ.get("TMPDIR", "/tmp"),
+    }
+    for k in ("PATH", "LANG", "HOME", "TMPDIR"):
+        if k in os.environ:
+            clean_env[k] = os.environ[k]
     clean_env["LC_ALL"] = "C.UTF-8"
+    clean_env["PYTHONUNBUFFERED"] = "1"
     clean_env["PYTHONDONTWRITEBYTECODE"] = "1"
     clean_env["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
+
+    if env:
+        clean_env.update(env)
 
     timed_out = False
     truncated = False
@@ -236,6 +254,34 @@ def execute(
     stdout_bytes = b""
     stderr_bytes = b""
     runtime_error: str | None = None
+
+    stdout_buf = bytearray()
+    stderr_buf = bytearray()
+    trunc_lock = threading.Lock()
+
+    def _reader(stream: Any, buf: bytearray) -> None:
+        nonlocal truncated
+        try:
+            while True:
+                chunk = stream.read(65536)
+                if not chunk:
+                    break
+                remaining = max_capture_bytes - len(buf)
+                if remaining > 0:
+                    buf.extend(chunk[:remaining])
+                    if len(chunk) > remaining:
+                        with trunc_lock:
+                            truncated = True
+                else:
+                    with trunc_lock:
+                        truncated = True
+        except (OSError, ValueError):
+            pass
+        finally:
+            try:
+                stream.close()
+            except (OSError, ValueError):
+                pass
 
     try:
         proc = subprocess.Popen(
@@ -248,8 +294,17 @@ def execute(
             stderr=subprocess.PIPE,
         )
 
+        t_out = threading.Thread(
+            target=_reader, args=(proc.stdout, stdout_buf), daemon=True
+        )
+        t_err = threading.Thread(
+            target=_reader, args=(proc.stderr, stderr_buf), daemon=True
+        )
+        t_out.start()
+        t_err.start()
+
         try:
-            stdout_bytes, stderr_bytes = proc.communicate(timeout=timeout_seconds)
+            proc.wait(timeout=timeout_seconds)
             exit_code = proc.returncode
         except subprocess.TimeoutExpired:
             timed_out = True
@@ -259,17 +314,22 @@ def execute(
             except OSError:
                 proc.kill()
             try:
-                stdout_bytes, stderr_bytes = proc.communicate(timeout=5)
+                proc.wait(timeout=5)
             except (subprocess.TimeoutExpired, OSError):
                 pass
             exit_code = -1
+
+        t_out.join(timeout=5)
+        t_err.join(timeout=5)
+        stdout_bytes = bytes(stdout_buf)
+        stderr_bytes = bytes(stderr_buf)
     except Exception as exc:  # noqa: BLE001
         runtime_error = f"Subprocess launch failed: {exc}"
         exit_code = -1
 
     elapsed = time.monotonic() - start_time
 
-    # Cap captured stream sizes
+    # Cap captured stream sizes (defense-in-depth)
     if len(stdout_bytes) > max_capture_bytes:
         stdout_bytes = stdout_bytes[:max_capture_bytes]
         truncated = True
