@@ -6,6 +6,7 @@ SDD Sections 4.1, 4.4, 5, and Section 9.1 invariants.
 from __future__ import annotations
 
 import json
+from dataclasses import FrozenInstanceError
 from dataclasses import FrozenInstanceError, dataclass
 from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
