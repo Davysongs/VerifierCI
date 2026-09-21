@@ -105,28 +105,36 @@ class Worker:
         self.heartbeat_interval_seconds = heartbeat_interval_seconds
 
     def _resolve_snapshot(self, task_key: str, conn: sqlite3.Connection) -> Path:
+        p: Path
         if callable(self.snapshot_resolver):
-            return self.snapshot_resolver(task_key)
-        if (
+            p = self.snapshot_resolver(task_key)
+        elif (
             isinstance(self.snapshot_resolver, Mapping)
             and task_key in self.snapshot_resolver
         ):
-            return Path(self.snapshot_resolver[task_key])
-        row = conn.execute(
-            """
-            SELECT s.archive_uri
-            FROM repository_snapshots s
-            JOIN tasks t ON t.snapshot_digest = s.snapshot_digest
-            WHERE t.task_key = ?
-            """,
-            (task_key,),
-        ).fetchone()
-        if row and row["archive_uri"]:
-            uri = str(row["archive_uri"])
-            if uri.startswith("file://"):
-                return Path(uri[7:])
-            return Path(uri)
-        return self.work_dir / "snapshots" / task_key
+            p = Path(self.snapshot_resolver[task_key])
+        else:
+            row = conn.execute(
+                """
+                SELECT s.archive_uri
+                FROM repository_snapshots s
+                JOIN tasks t ON t.snapshot_digest = s.snapshot_digest
+                WHERE t.task_key = ?
+                """,
+                (task_key,),
+            ).fetchone()
+            if row and row["archive_uri"]:
+                uri = str(row["archive_uri"])
+                p = Path(uri[7:]) if uri.startswith("file://") else Path(uri)
+            else:
+                p = self.work_dir / "snapshots" / task_key
+
+        if not p.is_dir():
+            raise ValidationError(
+                f"Resolved snapshot directory does not exist: {p}",
+                code=ErrorCode.VALIDATION_ERROR.value,
+            )
+        return p
 
     def _resolve_diff(self, case_id: str, conn: sqlite3.Connection) -> bytes:
         if callable(self.diff_resolver):
@@ -142,32 +150,41 @@ class Worker:
             digest = str(row["diff_digest"])
             if self.artifact_store.exists(digest):
                 return self.artifact_store.read_bytes(digest)
+            raise ValidationError(
+                f"Diff artifact not found in store for digest: {digest}",
+                code=ErrorCode.VALIDATION_ERROR.value,
+            )
         return b""
 
     def _resolve_manifest(
         self, verifier_key: str, conn: sqlite3.Connection
     ) -> VerifierManifest:
+        manifest: VerifierManifest
         if callable(self.manifest_resolver):
-            return self.manifest_resolver(verifier_key)
-        if (
+            manifest = self.manifest_resolver(verifier_key)
+        elif (
             isinstance(self.manifest_resolver, Mapping)
             and verifier_key in self.manifest_resolver
         ):
-            return self.manifest_resolver[verifier_key]
-        row = conn.execute(
-            """
-            SELECT vm.manifest_hash, vm.mode, vm.command, vm.build_command,
-                   vm.expected_collection, vm.parser_id, vm.report_path,
-                   vm.payload_digest, vm.allowed_edit_paths, vm.required_pass_ids,
-                   vm.permitted_skips, vm.timeout_seconds
-            FROM verifier_manifests vm
-            JOIN verifier_versions vv ON vv.manifest_hash = vm.manifest_hash
-            WHERE vv.verifier_key = ?
-            """,
-            (verifier_key,),
-        ).fetchone()
-        if row:
-            return VerifierManifest(
+            manifest = self.manifest_resolver[verifier_key]
+        else:
+            row = conn.execute(
+                """
+                SELECT vm.manifest_hash, vm.mode, vm.command, vm.build_command,
+                       vm.expected_collection, vm.parser_id, vm.report_path,
+                       vm.payload_digest, vm.allowed_edit_paths, vm.required_pass_ids,
+                       vm.permitted_skips, vm.timeout_seconds
+                FROM verifier_manifests vm
+                JOIN verifier_versions vv ON vv.manifest_hash = vm.manifest_hash
+                WHERE vv.verifier_key = ?
+                """,
+                (verifier_key,),
+            ).fetchone()
+            if not row:
+                raise InfrastructureError(
+                    f"Cannot resolve VerifierManifest for verifier_key '{verifier_key}'"
+                )
+            manifest = VerifierManifest(
                 manifest_hash=row["manifest_hash"],
                 mode=row["mode"],
                 command=tuple(json.loads(row["command"])),
@@ -191,9 +208,14 @@ class Worker:
                 else (),
                 timeout_seconds=row["timeout_seconds"],
             )
-        raise InfrastructureError(
-            f"Cannot resolve VerifierManifest for verifier_key '{verifier_key}'"
-        )
+
+        rep_p = Path(manifest.report_path)
+        if rep_p.is_absolute() or ".." in rep_p.parts:
+            raise ValidationError(
+                f"Report path in verifier manifest must be relative and cannot escape: {manifest.report_path}",
+                code=ErrorCode.VALIDATION_ERROR.value,
+            )
+        return manifest
 
     def run_one(
         self,
@@ -220,10 +242,10 @@ class Worker:
         attempt_id = job.attempt_id or str(uuid.uuid4())
         current_job = job
 
-        # Start lease heartbeat thread
         conn_lock = threading.Lock()
         stop_heartbeat = threading.Event()
         lease_lost = threading.Event()
+        hb_thread: threading.Thread | None = None
 
         def _heartbeat_worker() -> None:
             nonlocal current_job
@@ -243,17 +265,19 @@ class Worker:
                 except Exception:  # noqa: BLE001
                     break
 
-        hb_thread = threading.Thread(target=_heartbeat_worker, daemon=True)
-        hb_thread.start()
-
         try:
-            # 1. Transition job to RUNNING
-            current_job = jobs.mark_running(conn, current_job, int(time.time() * 1000))
+            # 1. Transition job to RUNNING and resolve parameters under conn_lock
+            with conn_lock:
+                current_job = jobs.mark_running(
+                    conn, current_job, int(time.time() * 1000)
+                )
+                snapshot_dir = self._resolve_snapshot(current_job.task_key, conn)
+                diff_bytes = self._resolve_diff(current_job.case_id, conn)
+                manifest = self._resolve_manifest(current_job.verifier_key, conn)
 
-            # 2. Resolve parameters
-            snapshot_dir = self._resolve_snapshot(current_job.task_key, conn)
-            diff_bytes = self._resolve_diff(current_job.case_id, conn)
-            manifest = self._resolve_manifest(current_job.verifier_key, conn)
+            # Start lease heartbeat thread only after transitioning to RUNNING and resolving parameters
+            hb_thread = threading.Thread(target=_heartbeat_worker, daemon=True)
+            hb_thread.start()
 
             # 3. Prepare workspace
             workspace_ready = False
@@ -393,7 +417,8 @@ class Worker:
 
             # Stop heartbeat thread as execution has concluded
             stop_heartbeat.set()
-            hb_thread.join(timeout=2.0)
+            if hb_thread is not None:
+                hb_thread.join(timeout=2.0)
 
             # 5. Collect outputs & persist artifacts
             stdout_hash = None
@@ -411,7 +436,8 @@ class Worker:
                         kind="stdout",
                         access_policy="restricted",
                     )
-                    _register_artifact(conn, art)
+                    with conn_lock:
+                        _register_artifact(conn, art)
                     stdout_hash = art.digest
                     evidence_digests.append(art.digest)
 
@@ -425,7 +451,8 @@ class Worker:
                         kind="stderr",
                         access_policy="restricted",
                     )
-                    _register_artifact(conn, art)
+                    with conn_lock:
+                        _register_artifact(conn, art)
                     stderr_hash = art.digest
                     evidence_digests.append(art.digest)
 
@@ -440,7 +467,8 @@ class Worker:
                     access_policy="restricted",
                     media_type="application/json",
                 )
-                _register_artifact(conn, art)
+                with conn_lock:
+                    _register_artifact(conn, art)
                 report_digest = art.digest
                 evidence_digests.append(art.digest)
 
@@ -500,7 +528,8 @@ class Worker:
 
         finally:
             stop_heartbeat.set()
-            hb_thread.join(timeout=1.0)
+            if hb_thread is not None:
+                hb_thread.join(timeout=1.0)
             cleanup_attempt(attempt_id, self.work_dir)
 
     def run_until_terminal(

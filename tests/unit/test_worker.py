@@ -338,17 +338,34 @@ def test_worker_db_resolvers(setup_env: tuple[Database, Path, Path]) -> None:
     db, _snap_dir, root = setup_env
     conn = db.connection
 
+    # Worker with NO resolvers passed; relies on DB rows
+    worker = Worker(
+        work_dir=root / "work_db",
+    )
+    art = worker.artifact_store.put_bytes(
+        b"", max_bytes=1024, kind="diff", access_policy="restricted"
+    )
+    conn.execute(
+        """
+        INSERT INTO artifacts (digest, kind, size_bytes, storage_uri, media_type, access_policy, available, created_at)
+        VALUES (?, 'diff', ?, 'local', 'text/x-diff', 'restricted', 1, '2026-09-21T00:00:00Z')
+        """,
+        (art.digest, art.size_bytes),
+    )
+    d_snap = "a" * 64
+    conn.execute(
+        """
+        INSERT INTO patch_cases (case_id, task_key, diff_digest, base_snapshot_digest, source, parent_case_ids, family_id, role, provenance_digest, licence, created_at)
+        VALUES ('case_db_res', 'task1@1.0', ?, ?, 'reference', '[]', 'fam1', 'challenge', 'prov1', 'MIT', '2026-09-21T00:00:00Z')
+        """,
+        (art.digest, d_snap),
+    )
     # Insert a job
     conn.execute(
         """
         INSERT INTO jobs (job_id, run_id, task_key, case_id, verifier_key, repetition, state, fence, attempts_started)
-        VALUES ('j_db_res', 'run1', 'task1@1.0', 'case1', 'verifier@1.0', 0, 'PENDING', 0, 0)
+        VALUES ('j_db_res', 'run1', 'task1@1.0', 'case_db_res', 'verifier@1.0', 0, 'PENDING', 0, 0)
         """
-    )
-
-    # Worker with NO resolvers passed; relies on DB rows
-    worker = Worker(
-        work_dir=root / "work_db",
     )
 
     executed = worker.run_one(conn, run_id="run1")
@@ -555,7 +572,7 @@ def test_worker_heartbeat_and_stdout(setup_env: tuple[Database, Path, Path]) -> 
         "import json, sys, time\n"
         "from pathlib import Path\n"
         "print('stdout logging message', flush=True)\n"
-        "time.sleep(0.05)\n"
+        "time.sleep(0.12)\n"
         "out = Path(sys.argv[1])\n"
         "data = {'tests': [{'nodeid': 't1', 'outcome': 'passed'}]}\n"
         "(out / 'report.json').write_text(json.dumps(data))\n"
@@ -578,12 +595,13 @@ def test_worker_heartbeat_and_stdout(setup_env: tuple[Database, Path, Path]) -> 
         timeout_seconds=30,
     )
 
+    # Use lease_duration_ms (50ms) shorter than execution duration (120ms)
     worker = Worker(
         work_dir=root / "work_hb",
         diff_resolver={"case1": b""},
         manifest_resolver={"verifier@1.0": manifest},
         heartbeat_interval_seconds=0.01,
-        lease_duration_ms=5000,
+        lease_duration_ms=50,
     )
 
     executed = worker.run_one(conn, run_id="run1")
@@ -599,3 +617,88 @@ def test_worker_heartbeat_and_stdout(setup_env: tuple[Database, Path, Path]) -> 
     ).fetchone()
     assert att["stdout_hash"] is not None
     assert att["outcome"] == "accept"
+    assert att["disposition"] == "authoritative"
+
+
+def test_worker_resolve_snapshot_missing(
+    setup_env: tuple[Database, Path, Path],
+) -> None:
+    db, _snap_dir, root = setup_env
+    conn = db.connection
+    worker = Worker(
+        work_dir=root / "work_snap_err",
+        snapshot_resolver={"task1@1.0": root / "nonexistent_dir"},
+    )
+    from verifierci.errors import ValidationError
+
+    with pytest.raises(ValidationError) as exc:
+        worker._resolve_snapshot("task1@1.0", conn)
+    assert "Resolved snapshot directory does not exist" in str(exc.value)
+
+
+def test_worker_resolve_diff_missing_in_store(
+    setup_env: tuple[Database, Path, Path],
+) -> None:
+    db, _snap_dir, root = setup_env
+    conn = db.connection
+    worker = Worker(
+        work_dir=root / "work_diff_err",
+    )
+    from verifierci.errors import ValidationError
+
+    # case1 in setup_env references d_diff which is not in worker's artifact_store
+    with pytest.raises(ValidationError) as exc:
+        worker._resolve_diff("case1", conn)
+    assert "Diff artifact not found in store" in str(exc.value)
+
+
+def test_worker_resolve_manifest_invalid_report_path(
+    setup_env: tuple[Database, Path, Path],
+) -> None:
+    db, _snap_dir, root = setup_env
+    conn = db.connection
+    from verifierci.errors import ValidationError
+
+    # Traversal in report_path
+    bad_manifest1 = VerifierManifest(
+        manifest_hash="3" * 64,
+        mode="compatibility",
+        command=("cmd",),
+        build_command=(),
+        expected_collection=(),
+        parser_id="pytest-report-v1",
+        report_path="../outside.json",
+        payload_digest="c" * 64,
+        allowed_edit_paths=("*",),
+        required_pass_ids=(),
+        permitted_skips=(),
+        timeout_seconds=30,
+    )
+    worker1 = Worker(
+        work_dir=root / "work_rep_err1",
+        manifest_resolver={"v1": bad_manifest1},
+    )
+    with pytest.raises(ValidationError):
+        worker1._resolve_manifest("v1", conn)
+
+    # Absolute path in report_path
+    bad_manifest2 = VerifierManifest(
+        manifest_hash="3" * 64,
+        mode="compatibility",
+        command=("cmd",),
+        build_command=(),
+        expected_collection=(),
+        parser_id="pytest-report-v1",
+        report_path="/tmp/outside.json",
+        payload_digest="c" * 64,
+        allowed_edit_paths=("*",),
+        required_pass_ids=(),
+        permitted_skips=(),
+        timeout_seconds=30,
+    )
+    worker2 = Worker(
+        work_dir=root / "work_rep_err2",
+        manifest_resolver={"v2": bad_manifest2},
+    )
+    with pytest.raises(ValidationError):
+        worker2._resolve_manifest("v2", conn)
