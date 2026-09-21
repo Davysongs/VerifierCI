@@ -149,9 +149,7 @@ def test_migrations_checksum_mismatch(tmp_path: Path) -> None:
         assert ver == 1
 
         # Modify migration file
-        (mig_dir / "001_test.sql").write_text(
-            "CREATE TABLE t1 (x INT, y INT);", encoding="utf-8"
-        )
+        (mig_dir / "001_test.sql").write_text("CREATE TABLE t1 (x INT, y INT);", encoding="utf-8")
 
         with pytest.raises(IdentityConflict) as exc_info:
             migrate(conn, migrations_dir=mig_dir)
@@ -164,9 +162,7 @@ def test_migrations_target_version(tmp_path: Path) -> None:
     mig_dir = tmp_path / "migrations"
     mig_dir.mkdir()
     (mig_dir / "001_first.sql").write_text("CREATE TABLE t1 (x INT);", encoding="utf-8")
-    (mig_dir / "002_second.sql").write_text(
-        "CREATE TABLE t2 (x INT);", encoding="utf-8"
-    )
+    (mig_dir / "002_second.sql").write_text("CREATE TABLE t2 (x INT);", encoding="utf-8")
 
     conn = connect(":memory:")
     try:
@@ -245,52 +241,30 @@ def test_immutable_triggers_tasks_contracts_requirements() -> None:
         )
 
         # Trigger check: tasks cannot be updated or deleted
-        with pytest.raises(
-            sqlite3.DatabaseError, match="immutable entity tasks cannot be updated"
-        ):
-            conn.execute(
-                "UPDATE tasks SET statement = 'changed' WHERE task_key = 'tkey1'"
-            )
+        with pytest.raises(sqlite3.DatabaseError, match="immutable entity tasks cannot be updated"):
+            conn.execute("UPDATE tasks SET statement = 'changed' WHERE task_key = 'tkey1'")
 
-        with pytest.raises(
-            sqlite3.DatabaseError, match="immutable entity tasks cannot be deleted"
-        ):
+        with pytest.raises(sqlite3.DatabaseError, match="immutable entity tasks cannot be deleted"):
             conn.execute("DELETE FROM tasks WHERE task_key = 'tkey1'")
 
         # Trigger check: contracts cannot be updated or deleted
-        with pytest.raises(
-            sqlite3.DatabaseError, match="immutable entity contracts cannot be updated"
-        ):
-            conn.execute(
-                "UPDATE contracts SET allowed_variation = 'any' WHERE contract_hash = 'con1'"
-            )
+        with pytest.raises(sqlite3.DatabaseError, match="immutable entity contracts cannot be updated"):
+            conn.execute("UPDATE contracts SET allowed_variation = 'any' WHERE contract_hash = 'con1'")
 
-        with pytest.raises(
-            sqlite3.DatabaseError, match="immutable entity contracts cannot be deleted"
-        ):
+        with pytest.raises(sqlite3.DatabaseError, match="immutable entity contracts cannot be deleted"):
             conn.execute("DELETE FROM contracts WHERE contract_hash = 'con1'")
 
         # Trigger check: sealed artifact cannot be deleted
-        with pytest.raises(
-            sqlite3.DatabaseError, match="sealed artifacts cannot be deleted"
-        ):
+        with pytest.raises(sqlite3.DatabaseError, match="sealed artifacts cannot be deleted"):
             conn.execute("DELETE FROM artifacts WHERE digest = 'art1'")
 
         # Artifact core metadata cannot be updated
-        with pytest.raises(
-            sqlite3.DatabaseError,
-            match="immutable artifact core metadata cannot be updated",
-        ):
+        with pytest.raises(sqlite3.DatabaseError, match="immutable artifact core metadata cannot be updated"):
             conn.execute("UPDATE artifacts SET size_bytes = 999 WHERE digest = 'art1'")
 
         # But updating artifact availability IS permitted (operational update)
         conn.execute("UPDATE artifacts SET available = 0 WHERE digest = 'art1'")
-        assert (
-            conn.execute(
-                "SELECT available FROM artifacts WHERE digest = 'art1'"
-            ).fetchone()[0]
-            == 0
-        )
+        assert conn.execute("SELECT available FROM artifacts WHERE digest = 'art1'").fetchone()[0] == 0
 
     finally:
         conn.close()
@@ -362,22 +336,14 @@ def test_split_reservation_and_guard_development_membership() -> None:
         )
 
         # split_reservations cannot be updated or deleted
-        with pytest.raises(
-            sqlite3.DatabaseError, match="assessment reservation is permanent"
-        ):
-            conn.execute(
-                "UPDATE split_reservations SET reserved_at = '2026-09-22T00:00:00Z'"
-            )
+        with pytest.raises(sqlite3.DatabaseError, match="assessment reservation is permanent"):
+            conn.execute("UPDATE split_reservations SET reserved_at = '2026-09-22T00:00:00Z'")
 
-        with pytest.raises(
-            sqlite3.DatabaseError, match="assessment reservation is permanent"
-        ):
+        with pytest.raises(sqlite3.DatabaseError, match="assessment reservation is permanent"):
             conn.execute("DELETE FROM split_reservations")
 
         # guard_development_membership trigger should block inserting reserved case into development panel
-        with pytest.raises(
-            sqlite3.DatabaseError, match="assessment case or family is reserved"
-        ):
+        with pytest.raises(sqlite3.DatabaseError, match="assessment case or family is reserved"):
             conn.execute(
                 """
                 INSERT INTO panel_memberships (panel_key, case_id, adjudication_id, ordinal, expected_control_outcomes)
@@ -409,19 +375,14 @@ def test_migrations_missing_dir(tmp_path: Path) -> None:
 def test_migrations_syntax_error_rolls_back(tmp_path: Path) -> None:
     mig_dir = tmp_path / "migrations"
     mig_dir.mkdir()
-    (mig_dir / "001_bad.sql").write_text(
-        "CREATE TABLE t1 (x INT); INVALID SQL SYNTAX;", encoding="utf-8"
-    )
+    (mig_dir / "001_bad.sql").write_text("CREATE TABLE t1 (x INT); INVALID SQL SYNTAX;", encoding="utf-8")
 
     conn = connect(":memory:")
     try:
         with pytest.raises(sqlite3.OperationalError):
             migrate(conn, migrations_dir=mig_dir)
         # Verify t1 was not created due to rollback
-        assert (
-            conn.execute("SELECT name FROM sqlite_master WHERE name='t1'").fetchone()
-            is None
-        )
+        assert conn.execute("SELECT name FROM sqlite_master WHERE name='t1'").fetchone() is None
     finally:
         conn.close()
 
@@ -458,3 +419,4 @@ def test_database_disk_methods(tmp_path: Path) -> None:
         c2.close()
     finally:
         db.close()
+

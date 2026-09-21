@@ -7,8 +7,8 @@ reaping of expired leases, and cancellation handling.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
-
+from datetime import datetime, timezone
+import sqlite3
 import pytest
 
 from verifierci.errors import (
@@ -165,9 +165,7 @@ def test_mark_running_and_heartbeat(db: Database) -> None:
     assert db_job.state == "RUNNING"
 
     # 2. Heartbeat extends lease
-    renewed_job = heartbeat(
-        conn, running_job, now_ms=now_ms + 5000, extension_ms=30_000
-    )
+    renewed_job = heartbeat(conn, running_job, now_ms=now_ms + 5000, extension_ms=30_000)
     assert renewed_job.lease_expires_ms == now_ms + 35_000
 
     # 3. Heartbeat after expiration fails
@@ -177,7 +175,6 @@ def test_mark_running_and_heartbeat(db: Database) -> None:
 
     # 4. Token mismatch fails
     import dataclasses
-
     bad_token_job = dataclasses.replace(running_job, lease_token="wrong_token_hex")
     with pytest.raises(LeaseLost) as exc_info:
         mark_running(conn, bad_token_job, now_ms=now_ms + 2000)
@@ -199,8 +196,8 @@ def test_complete_authoritative(db: Database) -> None:
         evaluation_validity="valid",
         error_code=None,
         disposition="authoritative",
-        started_at=datetime.fromtimestamp(now_ms / 1000.0, UTC),
-        finished_at=datetime.fromtimestamp((now_ms + 5000) / 1000.0, UTC),
+        started_at=datetime.fromtimestamp(now_ms / 1000.0, timezone.utc),
+        finished_at=datetime.fromtimestamp((now_ms + 5000) / 1000.0, timezone.utc),
         exit_code=0,
         stdout_hash="out1",
         stderr_hash="err1",
@@ -258,8 +255,8 @@ def test_complete_duplicate_and_conflict(db: Database) -> None:
         evaluation_validity="valid",
         error_code=None,
         disposition="authoritative",
-        started_at=datetime.fromtimestamp(now_ms / 1000.0, UTC),
-        finished_at=datetime.fromtimestamp((now_ms + 2000) / 1000.0, UTC),
+        started_at=datetime.fromtimestamp(now_ms / 1000.0, timezone.utc),
+        finished_at=datetime.fromtimestamp((now_ms + 2000) / 1000.0, timezone.utc),
         exit_code=0,
         stdout_hash="out1",
         stderr_hash="err1",
@@ -329,8 +326,8 @@ def test_complete_stale_on_expired_lease(db: Database) -> None:
         evaluation_validity="valid",
         error_code=None,
         disposition="authoritative",
-        started_at=datetime.fromtimestamp(now_ms / 1000.0, UTC),
-        finished_at=datetime.fromtimestamp((now_ms + 40_000) / 1000.0, UTC),
+        started_at=datetime.fromtimestamp(now_ms / 1000.0, timezone.utc),
+        finished_at=datetime.fromtimestamp((now_ms + 40_000) / 1000.0, timezone.utc),
         exit_code=0,
         stdout_hash="out1",
         stderr_hash="err1",
@@ -415,9 +412,7 @@ def test_request_cancel(db: Database) -> None:
     request_cancel(conn, run_id="run1")
 
     # Audit run marked cancel_requested
-    run_row = conn.execute(
-        "SELECT cancel_requested FROM audit_runs WHERE run_id = 'run1'"
-    ).fetchone()
+    run_row = conn.execute("SELECT cancel_requested FROM audit_runs WHERE run_id = 'run1'").fetchone()
     assert run_row[0] == 1
 
     # Pending job cancelled
@@ -451,7 +446,6 @@ def test_mark_running_and_heartbeat_error_paths(db: Database) -> None:
     assert job is not None
 
     import dataclasses
-
     # Non-existent job
     fake_job = dataclasses.replace(job, job_id="nonexistent")
     with pytest.raises(LeaseLost):
@@ -473,7 +467,6 @@ def test_complete_error_outcome_and_terminal_scenarios(db: Database) -> None:
     assert job is not None
 
     import dataclasses
-
     # Complete non-existent job
     fake_job = dataclasses.replace(job, job_id="nonexistent")
     att = EvaluationAttempt(
@@ -484,8 +477,8 @@ def test_complete_error_outcome_and_terminal_scenarios(db: Database) -> None:
         evaluation_validity="invalid",
         error_code="BUILD_ERROR",
         disposition="authoritative",
-        started_at=datetime.fromtimestamp(1.0, UTC),
-        finished_at=datetime.fromtimestamp(2.0, UTC),
+        started_at=datetime.fromtimestamp(1.0, timezone.utc),
+        finished_at=datetime.fromtimestamp(2.0, timezone.utc),
         exit_code=1,
         stdout_hash=None,
         stderr_hash=None,
@@ -511,3 +504,4 @@ def test_complete_error_outcome_and_terminal_scenarios(db: Database) -> None:
     diff_att = dataclasses.replace(att, attempt_id="diff_attempt_id")
     status_diff = complete(conn, job, diff_att, now_ms=3000)
     assert status_diff == "stale"
+

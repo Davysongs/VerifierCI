@@ -5,10 +5,9 @@ SDD Section 4.1 & Section 7.1.
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 import io
-from datetime import UTC, datetime, timedelta
 from pathlib import Path
-
 import pytest
 
 from verifierci.errors import (
@@ -80,9 +79,7 @@ def test_put_bytes_and_stream_max_bytes_exceeded(tmp_path: Path) -> None:
 
     # put_stream exceeded
     with pytest.raises(ValidationError) as exc_info:
-        store.put_stream(
-            io.BytesIO(data), max_bytes=5, kind="diff", access_policy="public"
-        )
+        store.put_stream(io.BytesIO(data), max_bytes=5, kind="diff", access_policy="public")
     assert exc_info.value.code == ErrorCode.ARTIFACT_LIMIT.value
 
     # Check temporary files cleaned up
@@ -99,9 +96,7 @@ def test_invalid_access_policy(tmp_path: Path) -> None:
 def test_corrupted_artifact_detection(tmp_path: Path) -> None:
     store = ArtifactStore(tmp_path)
     data = b"pristine authentic content"
-    artifact = store.put_bytes(
-        data, max_bytes=100, kind="evidence", access_policy="public"
-    )
+    artifact = store.put_bytes(data, max_bytes=100, kind="evidence", access_policy="public")
 
     # Mutate a byte on disk
     target_path = store.get_path(artifact.digest)
@@ -200,34 +195,16 @@ def test_garbage_collection(tmp_path: Path) -> None:
     db = Database(":memory:")
     db.migrate()
 
-    now = datetime.now(UTC)
+    now = datetime.now(timezone.utc)
     expired = now - timedelta(days=1)
     future = now + timedelta(days=1)
 
     # 1. Expired restricted artifact (eligible for purge)
-    art1 = store.put_bytes(
-        b"temp1",
-        max_bytes=100,
-        kind="evidence",
-        access_policy="restricted",
-        retention_until=expired,
-    )
+    art1 = store.put_bytes(b"temp1", max_bytes=100, kind="evidence", access_policy="restricted", retention_until=expired)
     # 2. Expired sealed artifact (protected from purge)
-    art2 = store.put_bytes(
-        b"sealed_temp",
-        max_bytes=100,
-        kind="evidence",
-        access_policy="sealed",
-        retention_until=expired,
-    )
+    art2 = store.put_bytes(b"sealed_temp", max_bytes=100, kind="evidence", access_policy="sealed", retention_until=expired)
     # 3. Future restricted artifact (not expired)
-    art3 = store.put_bytes(
-        b"active",
-        max_bytes=100,
-        kind="evidence",
-        access_policy="restricted",
-        retention_until=future,
-    )
+    art3 = store.put_bytes(b"active", max_bytes=100, kind="evidence", access_policy="restricted", retention_until=future)
 
     with db.transaction(immediate=True) as conn:
         for a in (art1, art2, art3):
@@ -236,16 +213,7 @@ def test_garbage_collection(tmp_path: Path) -> None:
                 INSERT INTO artifacts (digest, kind, size_bytes, storage_uri, media_type, access_policy, retention_until, available, created_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)
                 """,
-                (
-                    a.digest,
-                    a.kind,
-                    a.size_bytes,
-                    a.storage_uri,
-                    a.media_type,
-                    a.access_policy,
-                    a.retention_until.isoformat() if a.retention_until else None,
-                    a.created_at.isoformat(),
-                ),
+                (a.digest, a.kind, a.size_bytes, a.storage_uri, a.media_type, a.access_policy, a.retention_until.isoformat() if a.retention_until else None, a.created_at.isoformat()),
             )
 
     # Dry run
@@ -261,7 +229,6 @@ def test_garbage_collection(tmp_path: Path) -> None:
     assert store.exists(art3.digest) is True
 
     # Database marked art1 unavailable
-    row = db.connection.execute(
-        "SELECT available FROM artifacts WHERE digest = ?", (art1.digest,)
-    ).fetchone()
+    row = db.connection.execute("SELECT available FROM artifacts WHERE digest = ?", (art1.digest,)).fetchone()
     assert row[0] == 0
+

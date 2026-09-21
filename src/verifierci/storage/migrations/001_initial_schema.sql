@@ -561,3 +561,4 @@ BEGIN SELECT RAISE(ABORT, 'authoritative evaluation attempt cannot be updated');
 CREATE TRIGGER attempts_authoritative_no_delete BEFORE DELETE ON evaluation_attempts
 WHEN OLD.disposition = 'authoritative'
 BEGIN SELECT RAISE(ABORT, 'authoritative evaluation attempt cannot be deleted'); END;
+
