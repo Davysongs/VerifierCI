@@ -245,3 +245,94 @@ control_files:
         bundle = adapter.import_task(req)
         assert len(bundle.controls) == 1
         assert bundle.controls[0].case_id == "sample-task-ctrl-c1"
+
+
+def test_import_task_invalid_requirements() -> None:
+    adapter = LocalAdapter()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        snap = root / "source"
+        snap.mkdir()
+
+        # contract with non-list requirements
+        (root / "contract.yaml").write_text(
+            "version: '1.0.0'\nrequirements: not-a-list\n"
+        )
+        (root / "v1.yaml").write_text(
+            "mode: compatibility\ncommand: [python]\nparser_id: pytest-report-v1\nreport_path: rep.json\n"
+        )
+        task_yaml = root / "task.yaml"
+        task_yaml.write_text(
+            """schema_version: '1.0.0'
+task_id: req-task
+version: '1.0.0'
+statement: do something
+licence: MIT
+provenance: local
+eligibility: eligible
+contract_file: contract.yaml
+snapshot_file: source/
+verifier_file: v1.yaml
+"""
+        )
+        req = ImportRequest(
+            adapter="local",
+            instance="req-task",
+            source=str(task_yaml),
+            source_revision="v1",
+            environment_manifest=None,
+            output_dir=str(root / "out"),
+            dry_run=True,
+        )
+        with pytest.raises(ValidationError) as exc:
+            adapter.import_task(req)
+        assert "requirements' must be a list" in str(exc.value)
+
+        # contract with non-mapping requirement entry
+        (root / "contract.yaml").write_text(
+            "version: '1.0.0'\nrequirements: ['not-a-map']\n"
+        )
+        with pytest.raises(ValidationError) as exc2:
+            adapter.import_task(req)
+        assert "Each requirement entry must be a mapping" in str(exc2.value)
+
+
+def test_import_task_environment_file_fallback() -> None:
+    adapter = LocalAdapter()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        snap = root / "source"
+        snap.mkdir()
+        (root / "contract.yaml").write_text("version: '1.0.0'\nrequirements: []\n")
+        (root / "env.yaml").write_text("backend: fixture\nplatform: linux/amd64\n")
+        (root / "v1.yaml").write_text(
+            "mode: compatibility\ncommand: [python]\nparser_id: pytest-report-v1\nreport_path: rep.json\n"
+        )
+        task_yaml = root / "task.yaml"
+        # Inline environment is not a mapping (e.g., string or None)
+        task_yaml.write_text(
+            """schema_version: '1.0.0'
+task_id: env-task
+version: '1.0.0'
+statement: do something
+licence: MIT
+provenance: local
+eligibility: eligible
+contract_file: contract.yaml
+snapshot_file: source/
+environment: "invalid-string-not-map"
+environment_file: env.yaml
+verifier_file: v1.yaml
+"""
+        )
+        req = ImportRequest(
+            adapter="local",
+            instance="env-task",
+            source=str(task_yaml),
+            source_revision="v1",
+            environment_manifest=None,
+            output_dir=str(root / "out"),
+            dry_run=True,
+        )
+        bundle = adapter.import_task(req)
+        assert bundle.environment.platform == "linux/amd64"

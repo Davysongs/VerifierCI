@@ -1,4 +1,3 @@
-"""Adapter contract for verifier backends."""
 """Adapter contract for verifier backends and task importers.
 
 SDD Section 5: TaskAdapter boundary.
@@ -6,27 +5,18 @@ SDD Section 5: TaskAdapter boundary.
 
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
 from typing import Protocol, runtime_checkable
 
 from verifierci.models.protocol import ImportBundle, ImportRequest
 
-class VerificationAdapter(ABC):
-    """Abstract adapter interface for verifier-specific execution engines."""
 
-    @abstractmethod
 @runtime_checkable
 class TaskAdapter(Protocol):
     """Abstract task adapter boundary for importing benchmark and native tasks."""
 
-    def name(self) -> str:
-        raise NotImplementedError
-        """Return the adapter identity (e.g. 'local', 'swebench', 'harbor')."""
-        ...
+    name: str
 
-    @abstractmethod
     def supports(self, task_id: str) -> bool:
-        raise NotImplementedError
         """Check whether this adapter supports the given task id."""
         ...
 

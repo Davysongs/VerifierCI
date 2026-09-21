@@ -1,23 +1,18 @@
-"""Local adapter skeleton."""
 """Local task adapter for native VerifierCI tasks (Phase 1).
 
-from .base import VerificationAdapter
 SDD Section 5: verifierci.adapters.local.
 Imports the native manifest used by the retry fixture and hand-authored tasks.
 """
 
 from __future__ import annotations
 
-class LocalAdapter(VerificationAdapter):
-    """Placeholder adapter for local verifier execution."""
 import hashlib
 import os
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-    def name(self) -> str:
-        return "local"
 import yaml  # type: ignore[import-untyped]
 
 from verifierci.adapters.base import TaskAdapter
@@ -140,13 +135,15 @@ def _resolve_relative_path(root_dir: Path, rel_path_str: str) -> Path:
     return p
 
 
-def read_local_manifest(path: Path) -> LocalImportManifest:
+def read_local_manifest(
+    path: Path, manifest_data: dict[str, Any] | None = None
+) -> LocalImportManifest:
     """Read a local import manifest from a YAML file.
 
     Loads the task and resolves referenced contract, snapshot, environment,
     verifier, requirement, and control files.
     """
-    data = _safe_load_yaml(path)
+    data = manifest_data if manifest_data is not None else _safe_load_yaml(path)
     root_dir = path.parent
 
     if "task_id" not in data and "task" not in data:
@@ -229,15 +226,10 @@ def read_local_manifest(path: Path) -> LocalImportManifest:
     )
 
 
-class _AdapterName(str):
-    def __call__(self) -> str:
-        return str(self)
-
-
 class LocalAdapter(TaskAdapter):
     """Adapter for importing native local tasks and fixtures."""
 
-    name = _AdapterName("local")
+    name: str = "local"
 
     def supports(self, task_id: str) -> bool:
         return bool(task_id)
@@ -269,6 +261,11 @@ class LocalAdapter(TaskAdapter):
                 f"Local task manifest not found: {request.source}",
                 code=ErrorCode.VALIDATION_ERROR.value,
             )
+        if manifest_path.stat().st_size > MAX_MANIFEST_BYTES:
+            raise ValidationError(
+                f"File exceeds maximum allowed size of {MAX_MANIFEST_BYTES} bytes",
+                code=ErrorCode.VALIDATION_ERROR.value,
+            )
 
         raw_bytes = manifest_path.read_bytes()
         upstream_digest = hashlib.sha256(raw_bytes).hexdigest()
@@ -284,7 +281,8 @@ class LocalAdapter(TaskAdapter):
             created_at=datetime.now(UTC),
         )
 
-        local_manifest = read_local_manifest(manifest_path)
+        manifest_data = _safe_load_yaml(manifest_path)
+        local_manifest = read_local_manifest(manifest_path, manifest_data=manifest_data)
         root_dir = manifest_path.parent
 
         # 1. Parse Contract & Requirements
@@ -294,8 +292,18 @@ class LocalAdapter(TaskAdapter):
         )
 
         raw_reqs = contract_data.get("requirements", [])
+        if not isinstance(raw_reqs, list):
+            raise ValidationError(
+                "contract 'requirements' must be a list",
+                code=ErrorCode.VALIDATION_ERROR.value,
+            )
         requirements_list: list[Requirement] = []
         for r in raw_reqs:
+            if not isinstance(r, Mapping):
+                raise ValidationError(
+                    "Each requirement entry must be a mapping",
+                    code=ErrorCode.VALIDATION_ERROR.value,
+                )
             req_id = str(r.get("requirement_id", "REQ"))
             text = str(r.get("text", "")).strip()
             source_kind = r.get("source_kind", "explicit")
@@ -354,11 +362,14 @@ class LocalAdapter(TaskAdapter):
         )
 
         # 2. Parse Environment
-        env_raw_data = _safe_load_yaml(manifest_path).get("environment", {})
+        raw_env = manifest_data.get("environment")
+        env_raw_data = raw_env if isinstance(raw_env, Mapping) else {}
         if not env_raw_data and local_manifest.environment_file:
-            env_p = root_dir / local_manifest.environment_file
+            env_p = _resolve_relative_path(root_dir, local_manifest.environment_file)
             if env_p.is_file():
-                env_raw_data = _safe_load_yaml(env_p)
+                loaded_env = _safe_load_yaml(env_p)
+                if isinstance(loaded_env, Mapping):
+                    env_raw_data = loaded_env
 
         backend = env_raw_data.get("backend", "fixture")
         if backend not in ("fixture", "docker"):
@@ -383,10 +394,12 @@ class LocalAdapter(TaskAdapter):
         snapshot_dir = root_dir / local_manifest.snapshot_file
         snapshot_digest = hashlib.sha256(b"empty_snapshot").hexdigest()
         if snapshot_dir.is_dir():
-            # Hash directory content
+            # Hash directory content canonically with relative POSIX paths
             hasher = hashlib.sha256()
             for child in sorted(snapshot_dir.rglob("*")):
                 if child.is_file() and not child.is_symlink():
+                    rel_posix = child.relative_to(snapshot_dir).as_posix()
+                    hasher.update((rel_posix + "\0").encode("utf-8"))
                     hasher.update(child.read_bytes())
             snapshot_digest = hasher.hexdigest()
 
