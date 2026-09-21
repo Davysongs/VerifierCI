@@ -11,6 +11,7 @@ Tests compatibility-mode report evaluator:
 from __future__ import annotations
 
 import json
+from typing import Any
 
 from verifierci.errors import ErrorCode
 from verifierci.evaluators.pytest_report import PytestReportParser
@@ -99,7 +100,7 @@ def test_empty_test_collection() -> None:
     manifest = _make_manifest()
     capture = _make_capture()
 
-    data = {"tests": []}
+    data: dict[str, Any] = {"tests": []}
     outcome = parser.parse(json.dumps(data).encode("utf-8"), manifest, capture)
     assert outcome.outcome == "invalid_evaluation"
     assert outcome.error_code == ErrorCode.EMPTY_COLLECTION.value
@@ -246,7 +247,7 @@ def test_duration_parsing() -> None:
     assert outcome1.report is not None
     assert outcome1.report.results[0].duration == 1.25
 
-    # Malformed duration should fall back to None without raising
+    # Malformed duration should return PARSER_ERROR
     data2 = {
         "tests": [
             {
@@ -257,5 +258,19 @@ def test_duration_parsing() -> None:
         ]
     }
     outcome2 = parser.parse(json.dumps(data2).encode("utf-8"), manifest, capture)
-    assert outcome2.report is not None
-    assert outcome2.report.results[0].duration is None
+    assert outcome2.outcome == "invalid_evaluation"
+    assert outcome2.error_code == ErrorCode.PARSER_ERROR.value
+
+    # Null duration should safely retain None
+    data3 = {
+        "tests": [
+            {
+                "nodeid": "tests/test_app.py::test_one",
+                "outcome": "passed",
+                "duration": None,
+            }
+        ]
+    }
+    outcome3 = parser.parse(json.dumps(data3).encode("utf-8"), manifest, capture)
+    assert outcome3.report is not None
+    assert outcome3.report.results[0].duration is None

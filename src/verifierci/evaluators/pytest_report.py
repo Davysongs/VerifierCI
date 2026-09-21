@@ -114,7 +114,13 @@ class PytestReportParser:
                 try:
                     duration = float(t["duration"])
                 except (TypeError, ValueError):
-                    duration = None
+                    return ParsedOutcome(
+                        outcome="invalid_evaluation",
+                        evaluation_validity="invalid",
+                        error_code=ErrorCode.PARSER_ERROR.value,
+                        report=None,
+                        evidence_digests=(),
+                    )
 
             if raw_outcome == "passed":
                 status = "passed"
