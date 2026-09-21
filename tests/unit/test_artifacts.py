@@ -122,9 +122,9 @@ def test_missing_and_invalid_digest(tmp_path: Path) -> None:
     assert exc_info.value.code == ErrorCode.INFRASTRUCTURE_ERROR.value
 
     # Invalid digest format
-    with pytest.raises(ValidationError) as exc_info:
+    with pytest.raises(ValidationError) as exc_val:
         store.open_verified("short_digest")
-    assert exc_info.value.code == ErrorCode.VALIDATION_ERROR.value
+    assert exc_val.value.code == ErrorCode.VALIDATION_ERROR.value
 
     assert store.exists("short_digest") is False
 
@@ -228,6 +228,14 @@ def test_garbage_collection(tmp_path: Path) -> None:
         access_policy="restricted",
         retention_until=future,
     )
+    # 4. Expired restricted artifact with explicit 'Z' suffix in database
+    art4 = store.put_bytes(
+        b"z_temp",
+        max_bytes=100,
+        kind="evidence",
+        access_policy="restricted",
+        retention_until=expired,
+    )
 
     with db.transaction(immediate=True) as conn:
         for a in (art1, art2, art3):
@@ -247,21 +255,42 @@ def test_garbage_collection(tmp_path: Path) -> None:
                     a.created_at.isoformat(),
                 ),
             )
+        # Explicit Z suffix
+        conn.execute(
+            """
+            INSERT INTO artifacts (digest, kind, size_bytes, storage_uri, media_type, access_policy, retention_until, available, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, '2020-01-01T00:00:00Z', 1, ?)
+            """,
+            (
+                art4.digest,
+                art4.kind,
+                art4.size_bytes,
+                art4.storage_uri,
+                art4.media_type,
+                art4.access_policy,
+                art4.created_at.isoformat(),
+            ),
+        )
+
+    expected_purged = tuple(sorted([art1.digest, art4.digest]))
 
     # Dry run
     dry_purged = store.garbage_collect(db.connection, now=now, dry_run=True)
-    assert dry_purged == (art1.digest,)
+    assert dry_purged == expected_purged
     assert store.exists(art1.digest) is True
+    assert store.exists(art4.digest) is True
 
     # Real purge
     purged = store.garbage_collect(db.connection, now=now, dry_run=False)
-    assert purged == (art1.digest,)
+    assert purged == expected_purged
     assert store.exists(art1.digest) is False
+    assert store.exists(art4.digest) is False
     assert store.exists(art2.digest) is True
     assert store.exists(art3.digest) is True
 
-    # Database marked art1 unavailable
-    row = db.connection.execute(
-        "SELECT available FROM artifacts WHERE digest = ?", (art1.digest,)
-    ).fetchone()
-    assert row[0] == 0
+    # Database marked art1 and art4 unavailable
+    for d in (art1.digest, art4.digest):
+        row = db.connection.execute(
+            "SELECT available FROM artifacts WHERE digest = ?", (d,)
+        ).fetchone()
+        assert row[0] == 0

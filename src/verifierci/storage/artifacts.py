@@ -269,35 +269,48 @@ def garbage_collect(
 
     Returns the tuple of purged or purgeable artifact digests.
     """
-    now_iso = now.isoformat()
+    now_utc = now if now.tzinfo is not None else now.replace(tzinfo=UTC)
+    now_utc = now_utc.astimezone(UTC)
+
     rows = conn.execute(
         """
         SELECT digest, access_policy, retention_until
         FROM artifacts
         WHERE retention_until IS NOT NULL
-          AND retention_until <= ?
           AND access_policy != 'sealed'
           AND available = 1
         ORDER BY digest ASC
-        """,
-        (now_iso,),
+        """
     ).fetchall()
 
     purged: list[str] = []
     for row in rows:
-        digest = row["digest"]
-        target_path = root / "sha256" / digest[:2] / digest[2:]
-        if not dry_run:
-            if target_path.exists():
-                try:
-                    target_path.unlink()
-                except OSError:
-                    pass
-            conn.execute(
-                "UPDATE artifacts SET available = 0 WHERE digest = ?",
-                (digest,),
-            )
-        purged.append(digest)
+        raw_ts = str(row["retention_until"]).strip()
+        try:
+            if raw_ts.endswith("Z"):
+                raw_ts = raw_ts[:-1] + "+00:00"
+            ret_dt = datetime.fromisoformat(raw_ts)
+            if ret_dt.tzinfo is None:
+                ret_dt = ret_dt.replace(tzinfo=UTC)
+            else:
+                ret_dt = ret_dt.astimezone(UTC)
+        except (ValueError, TypeError):
+            continue
+
+        if ret_dt <= now_utc:
+            digest = row["digest"]
+            target_path = root / "sha256" / digest[:2] / digest[2:]
+            if not dry_run:
+                if target_path.exists():
+                    try:
+                        target_path.unlink()
+                    except OSError:
+                        pass
+                conn.execute(
+                    "UPDATE artifacts SET available = 0 WHERE digest = ?",
+                    (digest,),
+                )
+            purged.append(digest)
 
     return tuple(purged)
 
