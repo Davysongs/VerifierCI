@@ -517,6 +517,10 @@ class WorkerResponse(TypedDict):
 
 def validate_wire_version(version: str) -> None:
     """Validate that incoming wire request uses a supported protocol version."""
+    if not isinstance(version, str):
+        raise ValidationError(
+            f"Expected str for wire version, got {type(version).__name__}."
+        )
     if version not in SUPPORTED_WIRE_VERSIONS:
         raise ValidationError(
             f"Unsupported wire version '{version}'. Supported versions: {sorted(SUPPORTED_WIRE_VERSIONS)}."
@@ -618,6 +622,10 @@ def decode_record(
         and len(data) == 3
     ):
         schema_ver = data["schema_version"]
+        if not isinstance(schema_ver, str):
+            raise ValidationError(
+                f"Expected str for schema_version, got {type(schema_ver).__name__}."
+            )
         if schema_ver not in SUPPORTED_SCHEMA_VERSIONS:
             raise ValidationError(
                 f"Unsupported schema version '{schema_ver}'. Supported versions: {sorted(SUPPORTED_SCHEMA_VERSIONS)}."
@@ -640,6 +648,10 @@ def _instantiate_dataclass(cls: Any, data: Any) -> Any:
     # Validate schema_version if present in top-level entity or report
     if "schema_version" in data:
         schema_ver = data["schema_version"]
+        if not isinstance(schema_ver, str):
+            raise ValidationError(
+                f"Expected str for schema_version, got {type(schema_ver).__name__}."
+            )
         if schema_ver not in SUPPORTED_SCHEMA_VERSIONS:
             raise ValidationError(
                 f"Unsupported schema version '{schema_ver}'. Supported versions: {sorted(SUPPORTED_SCHEMA_VERSIONS)}."
@@ -672,11 +684,20 @@ def _instantiate_dataclass(cls: Any, data: Any) -> Any:
 
 
 def _convert_field(target_type: Any, val: Any) -> Any:
+    if target_type is Any:
+        if val is None:
+            return None
+        if isinstance(val, (dict, Mapping)):
+            return MappingProxyType(
+                {_convert_field(Any, k): _convert_field(Any, v) for k, v in val.items()}
+            )
+        if isinstance(val, (list, tuple)):
+            return tuple(_convert_field(Any, x) for x in val)
+        return val
+
     origin = get_origin(target_type)
 
     if val is None:
-        if target_type is Any:
-            return None
         if origin is Union or origin is types.UnionType:
             union_args = get_args(target_type)
             if type(None) in union_args:
@@ -720,11 +741,15 @@ def _convert_field(target_type: Any, val: Any) -> Any:
     if target_type is float:
         if not isinstance(val, (int, float)) or isinstance(val, bool):
             raise ValidationError(f"Expected float, got {type(val).__name__}.")
-        if math.isnan(val) or math.isinf(val):
+        try:
+            f_val = float(val)
+        except (OverflowError, ValueError) as exc:
+            raise ValidationError(f"Invalid float value: {exc}") from exc
+        if not math.isfinite(f_val):
             raise ValidationError(
                 "Non-finite float values are prohibited in canonical JSON."
             )
-        return float(val)
+        return f_val
 
     if target_type is str:
         if not isinstance(val, str):
@@ -765,7 +790,7 @@ def _convert_field(target_type: Any, val: Any) -> Any:
                     f"Expected tuple of length {len(tuple_args)}, got {len(val)}."
                 )
             return tuple(_convert_field(t, x) for t, x in zip(tuple_args, val))
-        return tuple(val)
+        return tuple(_convert_field(Any, x) for x in val)
 
     # If target_type is a Mapping or dict
     if origin in (dict, Mapping) or target_type in (dict, Mapping):
@@ -779,7 +804,9 @@ def _convert_field(target_type: Any, val: Any) -> Any:
                 for k, v in val.items()
             }
         else:
-            converted = dict(val)
+            converted = {
+                _convert_field(Any, k): _convert_field(Any, v) for k, v in val.items()
+            }
         return MappingProxyType(converted)
 
     if isinstance(target_type, type) and is_dataclass(target_type):

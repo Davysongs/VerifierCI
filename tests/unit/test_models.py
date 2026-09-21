@@ -6,8 +6,9 @@ SDD Sections 4.1, 4.4, 5, and Section 9.1 invariants.
 from __future__ import annotations
 
 import json
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, dataclass
 from datetime import UTC, datetime, timedelta, timezone
+from typing import Any
 
 import pytest
 
@@ -1076,3 +1077,171 @@ def test_decode_record_datetime_timezone_validation():
     decoded_task = decode_record("Task", json.dumps(task_data).encode("utf-8"))
     with pytest.raises(ValidationError, match="timezone-aware UTC"):
         validate_task(decoded_task, contract)  # type: ignore[arg-type]
+
+
+def test_float_validation_guarded_and_finite():
+    from verifierci.models.protocol import _convert_field
+
+    # Valid int converts to float
+    vote_data = {
+        "reviewer_id": "rev-1",
+        "label": "valid",
+        "rationale": "ok",
+        "minutes": 15,  # int converting to float 15.0
+        "blinded_to_verifier": True,
+        "independent_of_author": True,
+        "recorded_at": "2026-09-18T16:00:00Z",
+    }
+    decoded_vote = decode_record("ReviewVote", json.dumps(vote_data).encode("utf-8"))
+    assert decoded_vote.minutes == 15.0
+    assert isinstance(decoded_vote.minutes, float)
+
+    # Integer too large to convert to float (OverflowError -> ValidationError)
+    vote_data["minutes"] = 10**1000
+    with pytest.raises(ValidationError, match="Invalid float value"):
+        decode_record("ReviewVote", json.dumps(vote_data).encode("utf-8"))
+
+    # Non-finite float (nan / inf) rejected
+    with pytest.raises(ValidationError, match="Non-finite float values are prohibited"):
+        _convert_field(float, float("nan"))
+    with pytest.raises(ValidationError, match="Non-finite float values are prohibited"):
+        _convert_field(float, float("inf"))
+
+    # Boolean rejected for float
+    vote_data["minutes"] = True
+    with pytest.raises(ValidationError, match="Expected float, got bool"):
+        decode_record("ReviewVote", json.dumps(vote_data).encode("utf-8"))
+
+    # String rejected for float
+    vote_data["minutes"] = "15.0"
+    with pytest.raises(ValidationError, match="Expected float, got str"):
+        decode_record("ReviewVote", json.dumps(vote_data).encode("utf-8"))
+
+
+def test_any_target_type_recursively_freezes_containers():
+    from types import MappingProxyType
+
+    from verifierci.models.protocol import _convert_field
+
+    raw = {
+        "level1": {
+            "list": [1, {"deep": "val"}],
+            "tuple": (3, 4),
+        }
+    }
+    frozen = _convert_field(Any, raw)
+    assert isinstance(frozen, MappingProxyType)
+    assert isinstance(frozen["level1"], MappingProxyType)
+    assert isinstance(frozen["level1"]["list"], tuple)
+    assert isinstance(frozen["level1"]["list"][1], MappingProxyType)
+    assert frozen["level1"]["list"][1]["deep"] == "val"
+    with pytest.raises(TypeError):
+        frozen["level1"] = 1  # type: ignore[index]
+    with pytest.raises(TypeError):
+        frozen["level1"]["list"] = ()  # type: ignore[index]
+
+    # Test dict[str, Any] payloads are fully frozen
+    @dataclass(frozen=True, slots=True)
+    class SampleRecord:
+        payload: dict[str, Any]
+
+    sample_data = {
+        "payload": {
+            "ctrl_1": {"attempts": [1, 2], "nested": {"key": "value"}},
+            "budget": {"max_tokens": 1000, "limits": [10, {"tag": "high"}]},
+        }
+    }
+    from verifierci.models.protocol import _instantiate_dataclass
+
+    inst = _instantiate_dataclass(SampleRecord, sample_data)
+    assert isinstance(inst.payload, MappingProxyType)
+    assert isinstance(inst.payload["budget"], MappingProxyType)
+    assert isinstance(inst.payload["budget"]["limits"], tuple)
+    assert isinstance(inst.payload["budget"]["limits"][1], MappingProxyType)
+    assert isinstance(inst.payload["ctrl_1"], MappingProxyType)
+    assert isinstance(inst.payload["ctrl_1"]["attempts"], tuple)
+    assert isinstance(inst.payload["ctrl_1"]["nested"], MappingProxyType)
+    with pytest.raises(TypeError):
+        inst.payload["budget"] = {}  # type: ignore[index]
+    with pytest.raises(TypeError):
+        inst.payload["ctrl_1"]["attempts"] = []  # type: ignore[index]
+
+    # Explicitly typed fields (e.g. Mapping[str, int]) still validate element types
+    bad_term_data = {
+        "task_key": "task-1@1.0.0",
+        "numerator": 1,
+        "denominator": 2,
+        "excluded": {"reason": "not-an-int"},
+    }
+    with pytest.raises(ValidationError, match="Expected int, got str"):
+        decode_record("MetricTerm", json.dumps(bad_term_data).encode("utf-8"))
+
+
+def test_schema_version_type_check_prevents_unhashable_type_error():
+    from verifierci.models import validate_wire_version
+
+    # Array schema_version in envelope
+    envelope = {
+        "schema_version": ["1.0"],
+        "kind": "TaskPin",
+        "data": {
+            "task_key": "task-1@1.0.0",
+            "task_version": "1.0.0",
+            "contract_hash": "a" * 64,
+            "repository_snapshot_digest": "b" * 64,
+            "environment_id": "env-1",
+            "environment_image_digest": None,
+        },
+    }
+    with pytest.raises(
+        ValidationError, match="Expected str for schema_version, got list"
+    ):
+        decode_record("TaskPin", json.dumps(envelope).encode("utf-8"))
+
+    # Object schema_version in envelope
+    envelope["schema_version"] = {"ver": "1.0"}
+    with pytest.raises(
+        ValidationError, match="Expected str for schema_version, got dict"
+    ):
+        decode_record("TaskPin", json.dumps(envelope).encode("utf-8"))
+
+    # Int schema_version in envelope
+    envelope["schema_version"] = 1
+    with pytest.raises(
+        ValidationError, match="Expected str for schema_version, got int"
+    ):
+        decode_record("TaskPin", json.dumps(envelope).encode("utf-8"))
+
+    # Array schema_version in record with schema_version field
+    top_level = {
+        "schema_version": ["1.0"],
+        "task": {
+            "task_key": "task-1@1.0.0",
+            "task_id": "task-1",
+            "version": "1.0.0",
+            "statement": "task statement",
+            "adapter": "local",
+            "contract_hash": "0" * 64,
+            "snapshot_digest": "0" * 64,
+            "environment_id": "env-1",
+            "licence": "Apache-2.0",
+            "provenance": "local",
+            "eligibility": "eligible",
+            "notes": "",
+            "created_at": "2026-09-18T16:00:00Z",
+        },
+    }
+    with pytest.raises(
+        ValidationError, match="Expected str for schema_version, got list"
+    ):
+        decode_record("LocalImportManifest", json.dumps(top_level).encode("utf-8"))
+
+    # validate_wire_version rejects non-strings with ValidationError
+    with pytest.raises(
+        ValidationError, match="Expected str for wire version, got list"
+    ):
+        validate_wire_version(["1.0"])  # type: ignore[arg-type]
+    with pytest.raises(
+        ValidationError, match="Expected str for wire version, got dict"
+    ):
+        validate_wire_version({"ver": "1.0"})  # type: ignore[arg-type]
