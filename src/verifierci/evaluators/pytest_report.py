@@ -87,6 +87,7 @@ class PytestReportParser:
         test_results: list[TestResult] = []
         passed_count = 0
         failed_count = 0
+        parser_error = False
 
         for t in raw_tests:
             if not isinstance(t, dict):
@@ -115,13 +116,7 @@ class PytestReportParser:
                     duration = float(t["duration"])
                 except (TypeError, ValueError):
                     duration = None
-                    return ParsedOutcome(
-                        outcome="invalid_evaluation",
-                        evaluation_validity="invalid",
-                        error_code=ErrorCode.PARSER_ERROR.value,
-                        report=None,
-                        evidence_digests=(),
-                    )
+                    parser_error = True
 
             if raw_outcome == "passed":
                 status = "passed"
@@ -149,6 +144,15 @@ class PytestReportParser:
             completed=True,
             runner_error=None,
         )
+
+        if parser_error:
+            return ParsedOutcome(
+                outcome="invalid_evaluation",
+                evaluation_validity="invalid",
+                error_code=ErrorCode.PARSER_ERROR.value,
+                report=test_report,
+                evidence_digests=(),
+            )
 
         # 1. Empty collection check
         if not collected_tuple:
