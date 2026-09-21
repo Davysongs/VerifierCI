@@ -390,18 +390,57 @@ def complete(
             if row["selected_attempt_id"] == attempt.attempt_id:
                 att_row = conn.execute(
                     """
-                    SELECT outcome, exit_code, stdout_hash, stderr_hash, report_digest
+                    SELECT outcome, evaluation_validity, error_code, exit_code, stdout_hash,
+                           stderr_hash, report_digest, test_collection, tests_passed, tests_failed,
+                           resources, artifact_digests, capture_truncated
                     FROM evaluation_attempts WHERE attempt_id = ?
                     """,
                     (attempt.attempt_id,),
                 ).fetchone()
                 if att_row is not None:
+                    db_test_coll = (
+                        tuple(json.loads(att_row["test_collection"]))
+                        if att_row["test_collection"]
+                        else ()
+                    )
+                    db_artifacts = (
+                        tuple(json.loads(att_row["artifact_digests"]))
+                        if att_row["artifact_digests"]
+                        else ()
+                    )
+                    db_resources = (
+                        json.loads(att_row["resources"]) if att_row["resources"] else {}
+                    )
+
+                    att_resources = {
+                        "duration": attempt.resources.duration,
+                        "allocated_cpu": attempt.resources.allocated_cpu,
+                        "cpu_seconds": attempt.resources.cpu_seconds,
+                        "peak_memory": attempt.resources.peak_memory,
+                        "model_usage": dict(attempt.resources.model_usage)
+                        if attempt.resources.model_usage
+                        else None,
+                        "estimated_cost": attempt.resources.estimated_cost,
+                        "pricing_version": attempt.resources.pricing_version,
+                        "bytes_written": attempt.resources.bytes_written,
+                    }
+
                     matches = (
                         att_row["outcome"] == attempt.outcome
+                        and att_row["evaluation_validity"]
+                        == attempt.evaluation_validity
+                        and att_row["error_code"] == attempt.error_code
                         and att_row["exit_code"] == attempt.exit_code
                         and att_row["stdout_hash"] == attempt.stdout_hash
                         and att_row["stderr_hash"] == attempt.stderr_hash
                         and att_row["report_digest"] == attempt.report_digest
+                        and db_test_coll == tuple(attempt.test_collection)
+                        and att_row["tests_passed"] == attempt.tests_passed
+                        and att_row["tests_failed"] == attempt.tests_failed
+                        and db_resources == att_resources
+                        and db_artifacts == tuple(attempt.artifact_digests)
+                        and bool(att_row["capture_truncated"])
+                        == bool(attempt.capture_truncated)
                     )
                     if matches:
                         return "duplicate"
@@ -428,6 +467,21 @@ def complete(
             return "stale"
 
         # Case 3: Live lease, fence & token match -> commit as authoritative
+        att_check = conn.execute(
+            "SELECT job_id, fence FROM evaluation_attempts WHERE attempt_id = ?",
+            (attempt.attempt_id,),
+        ).fetchone()
+        if (
+            att_check is None
+            or att_check["job_id"] != job.job_id
+            or att_check["fence"] != job.fence
+            or attempt.job_id != job.job_id
+            or attempt.fence != job.fence
+        ):
+            raise IdentityConflict(
+                f"Attempt '{attempt.attempt_id}' does not match job '{job.job_id}' with fence {job.fence}.",
+                code=ErrorCode.IDENTITY_CONFLICT.value,
+            )
         finished_at_iso = (
             attempt.finished_at.isoformat()
             if attempt.finished_at is not None

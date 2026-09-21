@@ -501,6 +501,7 @@ def test_complete_error_outcome_and_terminal_scenarios(db: Database) -> None:
         complete(conn, fake_job, att, now_ms=2000)
 
     # Complete real job with error outcome -> transitions to FAILED
+    att = dataclasses.replace(att, job_id=job.job_id)
     status = complete(conn, job, att, now_ms=2000)
     assert status == "committed"
     j = get_job(conn, "job1")
@@ -511,3 +512,43 @@ def test_complete_error_outcome_and_terminal_scenarios(db: Database) -> None:
     diff_att = dataclasses.replace(att, attempt_id="diff_attempt_id")
     status_diff = complete(conn, job, diff_att, now_ms=3000)
     assert status_diff == "stale"
+
+    # Same attempt_id with identical content -> duplicate
+    status_dup = complete(conn, job, att, now_ms=3000)
+    assert status_dup == "duplicate"
+
+    # Same attempt_id with conflicting payload -> IdentityConflict
+    conflict_att = dataclasses.replace(att, tests_passed=99)
+    with pytest.raises(IdentityConflict):
+        complete(conn, job, conflict_att, now_ms=3000)
+
+
+def test_complete_mismatched_attempt_ownership(db: Database) -> None:
+    conn = db.connection
+    job = claim(conn, worker_id="w1", now_ms=1000)
+    assert job is not None
+
+    # Attempt with wrong fence in DB or wrong job_id
+    att = EvaluationAttempt(
+        attempt_id=job.attempt_id,  # type: ignore[arg-type]
+        job_id="wrong_job_id",
+        fence=999,
+        outcome="accept",
+        evaluation_validity="valid",
+        error_code=None,
+        disposition="authoritative",
+        started_at=datetime.fromtimestamp(1.0, UTC),
+        finished_at=datetime.fromtimestamp(2.0, UTC),
+        exit_code=0,
+        stdout_hash=None,
+        stderr_hash=None,
+        report_digest=None,
+        test_collection=(),
+        tests_passed=1,
+        tests_failed=0,
+        resources=ResourceUsage(None, None, None, None, None, None, None, None),
+        artifact_digests=(),
+        capture_truncated=False,
+    )
+    with pytest.raises(IdentityConflict):
+        complete(conn, job, att, now_ms=2000)
