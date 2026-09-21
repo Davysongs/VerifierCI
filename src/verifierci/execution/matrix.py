@@ -106,8 +106,6 @@ def aggregate_cell(
                 repetition_outcomes.append(active_or_done.outcome or "pending")
                 if active_or_done.error_code:
                     diagnostic_codes.append(active_or_done.error_code)
-                for a in rep_attempts[:-1]:
-                    excluded_attempt_ids.append(a.attempt_id)
                 for a in rep_attempts:
                     if a.attempt_id != active_or_done.attempt_id:
                         excluded_attempt_ids.append(a.attempt_id)
