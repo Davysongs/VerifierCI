@@ -628,3 +628,87 @@ def test_build_matrix_unknown_job_raises() -> None:
             cases={},
         )
     assert "references unknown job_id" in str(exc.value)
+
+
+def test_aggregate_cell_deterministic_attempt_selection_order() -> None:
+    # att_old has lower fence and earlier started_at
+    att_old = EvaluationAttempt(
+        attempt_id="att_old",
+        job_id="j0",
+        fence=1,
+        outcome="reject",
+        evaluation_validity="valid",
+        error_code=None,
+        disposition="authoritative",
+        started_at=datetime(2026, 9, 21, 10, 0, 0, tzinfo=UTC),
+        finished_at=datetime(2026, 9, 21, 10, 1, 0, tzinfo=UTC),
+        exit_code=1,
+        stdout_hash=None,
+        stderr_hash=None,
+        report_digest=None,
+        test_collection=("t1",),
+        tests_passed=0,
+        tests_failed=1,
+        resources=ResourceUsage(
+            duration=1.0,
+            allocated_cpu=1.0,
+            cpu_seconds=1.0,
+            peak_memory=None,
+            model_usage=None,
+            estimated_cost=None,
+            pricing_version=None,
+            bytes_written=0,
+        ),
+        artifact_digests=(),
+        capture_truncated=False,
+    )
+    # att_new has higher fence and later started_at
+    att_new = EvaluationAttempt(
+        attempt_id="att_new",
+        job_id="j0",
+        fence=2,
+        outcome="accept",
+        evaluation_validity="valid",
+        error_code=None,
+        disposition="authoritative",
+        started_at=datetime(2026, 9, 21, 10, 5, 0, tzinfo=UTC),
+        finished_at=datetime(2026, 9, 21, 10, 6, 0, tzinfo=UTC),
+        exit_code=0,
+        stdout_hash=None,
+        stderr_hash=None,
+        report_digest=None,
+        test_collection=("t1",),
+        tests_passed=1,
+        tests_failed=0,
+        resources=ResourceUsage(
+            duration=1.0,
+            allocated_cpu=1.0,
+            cpu_seconds=1.0,
+            peak_memory=None,
+            model_usage=None,
+            estimated_cost=None,
+            pricing_version=None,
+            bytes_written=0,
+        ),
+        artifact_digests=(),
+        capture_truncated=False,
+    )
+
+    # Pass in reversed order: [att_new, att_old]
+    cell = aggregate_cell(
+        task_key="task-1",
+        repository_id="repo-1",
+        case_id="case-1",
+        verifier_key="v-1",
+        adjudication_id="adj-1",
+        label="valid",
+        role="challenge",
+        planned_repetitions=1,
+        attempts=[att_new, att_old],
+        job_repetition_map={"j0": 0},
+    )
+
+    # Must select att_new (max by fence, started_at, attempt_id)
+    assert cell.selected_attempt_ids == ("att_new",)
+    assert cell.repetition_outcomes == ("accept",)
+    assert "att_old" in cell.excluded_attempt_ids

@@ -75,7 +75,10 @@ def aggregate_cell(
         authoritative = [a for a in rep_attempts if a.disposition == "authoritative"]
 
         if authoritative:
-            selected = authoritative[-1]
+            selected = max(
+                authoritative,
+                key=lambda a: (a.fence, a.started_at, a.attempt_id),
+            )
             selected_attempt_ids.append(selected.attempt_id)
             if selected.outcome is not None:
                 repetition_outcomes.append(selected.outcome)
@@ -89,7 +92,10 @@ def aggregate_cell(
                     excluded_attempt_ids.append(a.attempt_id)
         elif rep_attempts:
             # No authoritative attempt yet; pick the most recent if completed
-            active_or_done = rep_attempts[-1]
+            active_or_done = max(
+                rep_attempts,
+                key=lambda a: (a.fence, a.started_at, a.attempt_id),
+            )
             if active_or_done.disposition in ("stale", "abandoned"):
                 excluded_attempt_ids.extend(a.attempt_id for a in rep_attempts)
                 repetition_outcomes.append("pending")
@@ -98,8 +104,9 @@ def aggregate_cell(
                 repetition_outcomes.append(active_or_done.outcome or "pending")
                 if active_or_done.error_code:
                     diagnostic_codes.append(active_or_done.error_code)
-                for a in rep_attempts[:-1]:
-                    excluded_attempt_ids.append(a.attempt_id)
+                for a in rep_attempts:
+                    if a.attempt_id != active_or_done.attempt_id:
+                        excluded_attempt_ids.append(a.attempt_id)
         else:
             repetition_outcomes.append("pending")
 
