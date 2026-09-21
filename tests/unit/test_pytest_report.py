@@ -100,6 +100,7 @@ def test_empty_test_collection() -> None:
     manifest = _make_manifest()
     capture = _make_capture()
 
+    data = {"tests": []}
     data: dict[str, Any] = {"tests": []}
     outcome = parser.parse(json.dumps(data).encode("utf-8"), manifest, capture)
     assert outcome.outcome == "invalid_evaluation"
@@ -247,6 +248,7 @@ def test_duration_parsing() -> None:
     assert outcome1.report is not None
     assert outcome1.report.results[0].duration == 1.25
 
+    # Malformed duration should fall back to None without raising
     # Malformed duration should return PARSER_ERROR
     data2 = {
         "tests": [
@@ -258,6 +260,8 @@ def test_duration_parsing() -> None:
         ]
     }
     outcome2 = parser.parse(json.dumps(data2).encode("utf-8"), manifest, capture)
+    assert outcome2.report is not None
+    assert outcome2.report.results[0].duration is None
     assert outcome2.outcome == "invalid_evaluation"
     assert outcome2.error_code == ErrorCode.PARSER_ERROR.value
 

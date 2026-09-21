@@ -114,6 +114,7 @@ class PytestReportParser:
                 try:
                     duration = float(t["duration"])
                 except (TypeError, ValueError):
+                    duration = None
                     return ParsedOutcome(
                         outcome="invalid_evaluation",
                         evaluation_validity="invalid",
