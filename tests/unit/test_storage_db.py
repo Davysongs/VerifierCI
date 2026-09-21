@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -458,3 +459,231 @@ def test_database_disk_methods(tmp_path: Path) -> None:
         c2.close()
     finally:
         db.close()
+
+
+def test_database_memory_connect() -> None:
+    db = Database(":memory:")
+    try:
+        c1 = db.connection
+        c2 = db.connect()
+        assert c1 is c2
+    finally:
+        db.close()
+
+
+def test_environments_docker_image_digest_check() -> None:
+    conn = connect(":memory:")
+    try:
+        migrate(conn)
+
+        # backend == 'docker' without image_digest should fail CHECK constraint
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                """
+                INSERT INTO environments (
+                    environment_id, backend, platform, recipe_digest,
+                    lock_digests, service_manifests, resource_policy_hash,
+                    runtime_fingerprint, mirror_uris, image_digest
+                ) VALUES (
+                    'env_docker_null', 'docker', 'linux/amd64', 'rec1',
+                    '[]', '{}', 'p1', 'fp1', '[]', NULL
+                )
+                """
+            )
+
+        # backend == 'docker' without '@sha256:' in image_digest should fail
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                """
+                INSERT INTO environments (
+                    environment_id, backend, platform, recipe_digest,
+                    lock_digests, service_manifests, resource_policy_hash,
+                    runtime_fingerprint, mirror_uris, image_digest
+                ) VALUES (
+                    'env_docker_bad', 'docker', 'linux/amd64', 'rec1',
+                    '[]', '{}', 'p1', 'fp1', '[]', 'ubuntu:latest'
+                )
+                """
+            )
+
+        # backend == 'docker' with valid image_digest should succeed
+        conn.execute(
+            """
+            INSERT INTO environments (
+                environment_id, backend, platform, recipe_digest,
+                lock_digests, service_manifests, resource_policy_hash,
+                runtime_fingerprint, mirror_uris, image_digest
+            ) VALUES (
+                'env_docker_ok', 'docker', 'linux/amd64', 'rec1',
+                '[]', '{}', 'p1', 'fp1', '[]', 'ubuntu@sha256:abcdef123456'
+            )
+            """
+        )
+
+        # backend == 'fixture' with image_digest NULL should succeed
+        conn.execute(
+            """
+            INSERT INTO environments (
+                environment_id, backend, platform, recipe_digest,
+                lock_digests, service_manifests, resource_policy_hash,
+                runtime_fingerprint, mirror_uris, image_digest
+            ) VALUES (
+                'env_fixture_ok', 'fixture', 'linux/amd64', 'rec1',
+                '[]', '{}', 'p1', 'fp1', '[]', NULL
+            )
+            """
+        )
+        assert conn.execute("SELECT COUNT(*) FROM environments").fetchone()[0] == 2
+    finally:
+        conn.close()
+
+
+def test_artifacts_immutable_columns() -> None:
+    conn = connect(":memory:")
+    try:
+        migrate(conn)
+        conn.execute(
+            """
+            INSERT INTO artifacts (
+                digest, kind, size_bytes, storage_uri, media_type,
+                access_policy, available, retention_until, created_at
+            ) VALUES (
+                'art_meta', 'evidence', 10, 'file:///art', 'text/plain',
+                'restricted', 1, '2026-10-01T00:00:00Z', '2026-09-21T00:00:00Z'
+            )
+            """
+        )
+
+        # storage_uri cannot be updated
+        with pytest.raises(
+            sqlite3.DatabaseError,
+            match="immutable artifact core metadata cannot be updated",
+        ):
+            conn.execute(
+                "UPDATE artifacts SET storage_uri = 'file:///new' WHERE digest = 'art_meta'"
+            )
+
+        # access_policy cannot be updated
+        with pytest.raises(
+            sqlite3.DatabaseError,
+            match="immutable artifact core metadata cannot be updated",
+        ):
+            conn.execute(
+                "UPDATE artifacts SET access_policy = 'public' WHERE digest = 'art_meta'"
+            )
+
+        # retention_until cannot be updated
+        with pytest.raises(
+            sqlite3.DatabaseError,
+            match="immutable artifact core metadata cannot be updated",
+        ):
+            conn.execute(
+                "UPDATE artifacts SET retention_until = '2027-01-01T00:00:00Z' WHERE digest = 'art_meta'"
+            )
+
+        # available CAN be updated
+        conn.execute("UPDATE artifacts SET available = 0 WHERE digest = 'art_meta'")
+        assert (
+            conn.execute(
+                "SELECT available FROM artifacts WHERE digest = 'art_meta'"
+            ).fetchone()[0]
+            == 0
+        )
+    finally:
+        conn.close()
+
+
+def test_transaction_busy_timeout_setting_and_restoration(tmp_path: Path) -> None:
+    db_file = tmp_path / "timeout.db"
+    conn = connect(db_file)
+    try:
+        assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 5000
+
+        with transaction(conn, timeout=0.2):
+            # Inside transaction, busy_timeout is set to timeout in ms (200)
+            assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 200
+
+        # After clean exit, restored to 5000
+        assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 5000
+
+        # After exception exit, restored to 5000
+        with pytest.raises(RuntimeError), transaction(conn, timeout=0.1):
+            assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 100
+            raise RuntimeError("boom")
+
+        assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 5000
+    finally:
+        conn.close()
+
+
+def test_transaction_busy_retry_success(tmp_path: Path) -> None:
+    import threading
+    import time
+
+    db_file = tmp_path / "retry_busy.db"
+    conn1 = connect(db_file)
+    conn2 = connect(db_file)
+    try:
+        conn1.execute("CREATE TABLE t (x INT)")
+        conn1.execute("BEGIN EXCLUSIVE")
+
+        def release_lock() -> None:
+            time.sleep(0.05)
+            conn1.execute("COMMIT")
+
+        thread = threading.Thread(target=release_lock)
+        thread.start()
+
+        # conn2 should retry during the 0.05s lock and succeed once conn1 commits
+        with transaction(conn2, immediate=True, timeout=2.0):
+            conn2.execute("INSERT INTO t VALUES (42)")
+
+        thread.join()
+        assert conn2.execute("SELECT x FROM t").fetchone()[0] == 42
+    finally:
+        conn1.close()
+        conn2.close()
+
+
+def test_transaction_retry_on_busy_loop() -> None:
+    real_conn = connect(":memory:")
+    try:
+
+        class MockConn:
+            def __init__(self, real: sqlite3.Connection) -> None:
+                self.real = real
+                self.calls = 0
+
+            @property
+            def in_transaction(self) -> bool:
+                return self.real.in_transaction
+
+            def execute(self, sql: str, *args: Any, **kwargs: Any) -> Any:
+                if sql.startswith("BEGIN"):
+                    self.calls += 1
+                    if self.calls == 1:
+                        raise sqlite3.OperationalError("database is locked")
+                return self.real.execute(sql, *args, **kwargs)  # type: ignore[arg-type]
+
+        mock = MockConn(real_conn)
+        with transaction(mock, immediate=True, timeout=1.0):  # type: ignore[arg-type]
+            pass
+        assert mock.calls == 2
+    finally:
+        real_conn.close()
+
+
+def test_migrations_skips_non_integer_filenames(tmp_path: Path) -> None:
+    mig_dir = tmp_path / "migrations"
+    mig_dir.mkdir()
+    (mig_dir / "README.sql").write_text("-- Just documentation", encoding="utf-8")
+    (mig_dir / "001_initial.sql").write_text(
+        "CREATE TABLE t1 (x INT);", encoding="utf-8"
+    )
+
+    conn = connect(":memory:")
+    try:
+        ver = migrate(conn, migrations_dir=mig_dir)
+        assert ver == 1
+    finally:
+        conn.close()

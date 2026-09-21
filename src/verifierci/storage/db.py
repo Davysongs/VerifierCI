@@ -83,34 +83,42 @@ def transaction(
     start_time = time.monotonic()
     delay = 0.01
 
-    while True:
-        try:
-            conn.execute(cmd)
-            break
-        except sqlite3.OperationalError as exc:
-            msg = str(exc).lower()
-            if ("locked" in msg or "busy" in msg) and (
-                time.monotonic() - start_time < timeout
-            ):
-                sleep_time = delay + random.uniform(0, 0.02)
-                time.sleep(sleep_time)
-                delay = min(0.25, delay * 2)
-            else:
-                raise InfrastructureError(
-                    f"Failed to acquire transaction lock ({cmd}): {exc}",
-                    code=ErrorCode.DATABASE_ERROR.value,
-                ) from exc
-
+    timeout_ms = max(1, int(timeout * 1000))
+    conn.execute(f"PRAGMA busy_timeout = {timeout_ms};")
     try:
-        yield conn
-        conn.execute("COMMIT")
-    except BaseException:
-        if conn.in_transaction:
+        while True:
             try:
-                conn.execute("ROLLBACK")
-            except sqlite3.OperationalError:
-                pass
-        raise
+                conn.execute(cmd)
+                break
+            except sqlite3.OperationalError as exc:
+                msg = str(exc).lower()
+                if ("locked" in msg or "busy" in msg) and (
+                    time.monotonic() - start_time < timeout
+                ):
+                    sleep_time = delay + random.uniform(0, 0.02)
+                    time.sleep(sleep_time)
+                    delay = min(0.25, delay * 2)
+                else:
+                    raise InfrastructureError(
+                        f"Failed to acquire transaction lock ({cmd}): {exc}",
+                        code=ErrorCode.DATABASE_ERROR.value,
+                    ) from exc
+
+        try:
+            yield conn
+            conn.execute("COMMIT")
+        except BaseException:
+            if conn.in_transaction:
+                try:
+                    conn.execute("ROLLBACK")
+                except sqlite3.OperationalError:
+                    pass
+            raise
+    finally:
+        try:
+            conn.execute("PRAGMA busy_timeout = 5000;")
+        except (sqlite3.OperationalError, sqlite3.ProgrammingError):
+            pass
 
 
 def migrate(
@@ -178,16 +186,25 @@ def migrate(
         now_iso = datetime.now(UTC).isoformat()
         script = f"""BEGIN IMMEDIATE;
 {content}
-INSERT INTO schema_migrations (version, applied_at, checksum)
-VALUES ({version}, '{now_iso}', '{checksum}');
-COMMIT;
 """
         try:
             conn.executescript(script)
+            # Pre-commit foreign key integrity check
+            fk_violations = conn.execute("PRAGMA foreign_key_check;").fetchall()
+            if fk_violations:
+                raise ValidationError(
+                    f"Foreign key violations detected in migration {version}: {fk_violations}",
+                    code=ErrorCode.DATABASE_ERROR.value,
+                )
+            conn.execute(
+                "INSERT INTO schema_migrations (version, applied_at, checksum) VALUES (?, ?, ?);",
+                (version, now_iso, checksum),
+            )
+            conn.execute("COMMIT;")
         except Exception:
             if conn.in_transaction:
                 try:
-                    conn.execute("ROLLBACK")
+                    conn.execute("ROLLBACK;")
                 except sqlite3.OperationalError:
                     pass
             raise
@@ -195,7 +212,7 @@ COMMIT;
         applied[version] = checksum
         latest_version = version
 
-    # Post-migration foreign key integrity check
+    # Final post-migration foreign key integrity check
     fk_violations = conn.execute("PRAGMA foreign_key_check;").fetchall()
     if fk_violations:
         raise ValidationError(

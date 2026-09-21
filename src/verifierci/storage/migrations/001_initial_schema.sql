@@ -25,7 +25,7 @@ CREATE TABLE environments (
   resource_policy_hash TEXT NOT NULL,
   runtime_fingerprint TEXT NOT NULL,
   mirror_uris TEXT NOT NULL CHECK(json_valid(mirror_uris)),
-  CHECK(backend != 'docker' OR image_digest LIKE '%@sha256:%')
+  CHECK(backend != 'docker' OR (image_digest IS NOT NULL AND image_digest LIKE '%@sha256:%'))
 );
 
 -- 3. Requirements
@@ -547,8 +547,8 @@ BEGIN SELECT RAISE(ABORT, 'immutable entity gate_decisions cannot be updated'); 
 CREATE TRIGGER gate_decisions_no_delete BEFORE DELETE ON gate_decisions
 BEGIN SELECT RAISE(ABORT, 'immutable entity gate_decisions cannot be deleted'); END;
 
--- Artifacts: digest, kind, size_bytes, media_type, created_at are immutable.
-CREATE TRIGGER artifacts_no_core_update BEFORE UPDATE OF digest, kind, size_bytes, media_type, created_at ON artifacts
+-- Artifacts: digest, kind, size_bytes, media_type, created_at, storage_uri, access_policy, retention_until are immutable.
+CREATE TRIGGER artifacts_no_core_update BEFORE UPDATE OF digest, kind, size_bytes, media_type, created_at, storage_uri, access_policy, retention_until ON artifacts
 BEGIN SELECT RAISE(ABORT, 'immutable artifact core metadata cannot be updated'); END;
 CREATE TRIGGER artifacts_no_delete BEFORE DELETE ON artifacts
 WHEN OLD.access_policy = 'sealed'
