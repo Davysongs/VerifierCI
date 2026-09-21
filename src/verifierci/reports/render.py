@@ -7,6 +7,7 @@ from the audit's gate status.
 
 HTML templates with escaped content arrive in Phase 3.
 """
+
 from __future__ import annotations
 
 
@@ -15,4 +16,3 @@ class ReportRenderer:
 
     Outputs are written atomically: the previous file is preserved on failure.
     """
-

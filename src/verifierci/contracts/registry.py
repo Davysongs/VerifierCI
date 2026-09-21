@@ -2,6 +2,7 @@
 
 Full requirement review arrives in Phase 6.
 """
+
 from __future__ import annotations
 
 
@@ -11,4 +12,3 @@ class ContractRegistry:
     Phase 1: minimal hashing only.  Hash conflicts abort the import transaction.
     Existing versions are immutable.
     """
-

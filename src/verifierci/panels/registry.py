@@ -2,6 +2,7 @@
 
 Sealed registry with full protection error handling arrives in Phase 6.
 """
+
 from __future__ import annotations
 
 
@@ -17,4 +18,3 @@ class PanelRegistry:
 
 class ProtectionError(Exception):
     """Raised when a family reservation conflict is detected during panel insertion."""
-

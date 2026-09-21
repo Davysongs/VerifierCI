@@ -7,6 +7,7 @@ and runs a single claim-execute-commit cycle.
 The entrypoint never receives database access, adjudication labels, lease
 credentials, an artifact-store root or a Docker socket.
 """
+
 from __future__ import annotations
 
 
@@ -16,4 +17,3 @@ def main() -> None:
     Called by the controller or directly for trusted-fixture runs.
     """
     raise NotImplementedError("Phase 1 entrypoint stub.")
-

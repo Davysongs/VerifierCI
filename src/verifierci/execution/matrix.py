@@ -13,6 +13,7 @@ Rules:
 - Incomplete rows are displayed only as provisional.
 - Attaches the already-frozen adjudication by identity.
 """
+
 from __future__ import annotations
 
 
@@ -23,4 +24,3 @@ class AcceptanceMatrixBuilder:
     repetitions and records the authoritative result selected by the
     frozen retry policy.
     """
-

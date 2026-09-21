@@ -12,8 +12,8 @@ Contract:
 - Internal parser bugs return error and preserve input digests.
 - The parser does not infer success from text such as ``result=pass``.
 """
-from __future__ import annotations
 
+from __future__ import annotations
 
 PARSER_ID = "pytest-report-v1"
 
@@ -24,4 +24,3 @@ class PytestReportParser:
     Verifies the report and expected test identities before producing
     an outcome.  Does not consult independent adjudication.
     """
-
