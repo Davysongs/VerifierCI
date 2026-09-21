@@ -75,7 +75,13 @@ class PytestReportParser:
         # Extract test items
         raw_tests = data.get("tests", [])
         if not isinstance(raw_tests, list):
-            raw_tests = []
+            return ParsedOutcome(
+                outcome="invalid_evaluation",
+                evaluation_validity="invalid",
+                error_code=ErrorCode.PARSER_ERROR.value,
+                report=None,
+                evidence_digests=(),
+            )
 
         collected_ids: list[str] = []
         test_results: list[TestResult] = []
@@ -84,13 +90,31 @@ class PytestReportParser:
 
         for t in raw_tests:
             if not isinstance(t, dict):
-                continue
-            nodeid = str(t.get("nodeid", ""))
-            if not nodeid:
-                continue
+                return ParsedOutcome(
+                    outcome="invalid_evaluation",
+                    evaluation_validity="invalid",
+                    error_code=ErrorCode.PARSER_ERROR.value,
+                    report=None,
+                    evidence_digests=(),
+                )
+            nodeid = t.get("nodeid")
+            if not isinstance(nodeid, str) or not nodeid.strip():
+                return ParsedOutcome(
+                    outcome="invalid_evaluation",
+                    evaluation_validity="invalid",
+                    error_code=ErrorCode.PARSER_ERROR.value,
+                    report=None,
+                    evidence_digests=(),
+                )
             collected_ids.append(nodeid)
             raw_outcome = str(t.get("outcome", "failed")).lower()
-            duration = float(t.get("duration", 0.0)) if "duration" in t else None
+
+            duration: float | None = None
+            if "duration" in t and t["duration"] is not None:
+                try:
+                    duration = float(t["duration"])
+                except (TypeError, ValueError):
+                    duration = None
 
             if raw_outcome == "passed":
                 status = "passed"

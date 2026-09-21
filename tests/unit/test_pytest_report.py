@@ -88,6 +88,11 @@ def test_malformed_json() -> None:
     assert outcome.outcome == "invalid_evaluation"
     assert outcome.error_code == ErrorCode.PARSER_ERROR.value
 
+    # JSON valid but not a dict
+    outcome2 = parser.parse(b'"just a string"', manifest, capture)
+    assert outcome2.outcome == "invalid_evaluation"
+    assert outcome2.error_code == ErrorCode.PARSER_ERROR.value
+
 
 def test_empty_test_collection() -> None:
     parser = PytestReportParser()
@@ -191,3 +196,66 @@ def test_contradictory_exit_with_passing_report() -> None:
     assert outcome.outcome == "invalid_evaluation"
     assert outcome.evaluation_validity == "invalid"
     assert outcome.error_code == "EXIT_REPORT_MISMATCH"
+
+
+def test_malformed_test_entries() -> None:
+    parser = PytestReportParser()
+    manifest = _make_manifest()
+    capture = _make_capture()
+
+    # tests is not a list
+    data1 = {"tests": "not-a-list"}
+    outcome1 = parser.parse(json.dumps(data1).encode("utf-8"), manifest, capture)
+    assert outcome1.outcome == "invalid_evaluation"
+    assert outcome1.error_code == ErrorCode.PARSER_ERROR.value
+
+    # test entry is not a dict
+    data2 = {"tests": ["not-a-dict"]}
+    outcome2 = parser.parse(json.dumps(data2).encode("utf-8"), manifest, capture)
+    assert outcome2.outcome == "invalid_evaluation"
+    assert outcome2.error_code == ErrorCode.PARSER_ERROR.value
+
+    # test entry missing nodeid or empty nodeid
+    data3 = {"tests": [{"outcome": "passed"}]}
+    outcome3 = parser.parse(json.dumps(data3).encode("utf-8"), manifest, capture)
+    assert outcome3.outcome == "invalid_evaluation"
+    assert outcome3.error_code == ErrorCode.PARSER_ERROR.value
+
+    data4 = {"tests": [{"nodeid": "   ", "outcome": "passed"}]}
+    outcome4 = parser.parse(json.dumps(data4).encode("utf-8"), manifest, capture)
+    assert outcome4.outcome == "invalid_evaluation"
+    assert outcome4.error_code == ErrorCode.PARSER_ERROR.value
+
+
+def test_duration_parsing() -> None:
+    parser = PytestReportParser()
+    manifest = _make_manifest()
+    capture = _make_capture()
+
+    # Valid duration
+    data1 = {
+        "tests": [
+            {
+                "nodeid": "tests/test_app.py::test_one",
+                "outcome": "passed",
+                "duration": 1.25,
+            }
+        ]
+    }
+    outcome1 = parser.parse(json.dumps(data1).encode("utf-8"), manifest, capture)
+    assert outcome1.report is not None
+    assert outcome1.report.results[0].duration == 1.25
+
+    # Malformed duration should fall back to None without raising
+    data2 = {
+        "tests": [
+            {
+                "nodeid": "tests/test_app.py::test_one",
+                "outcome": "passed",
+                "duration": "not-a-number",
+            }
+        ]
+    }
+    outcome2 = parser.parse(json.dumps(data2).encode("utf-8"), manifest, capture)
+    assert outcome2.report is not None
+    assert outcome2.report.results[0].duration is None
