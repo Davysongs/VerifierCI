@@ -69,6 +69,35 @@ def _make_attempt(
     )
 
 
+def _make_manifest(
+    run_id: str = "run-1",
+    max_repetitions: int = 1,
+) -> AuditManifest:
+    return AuditManifest(
+        manifest_hash="mhash" + "0" * 59,
+        run_id=run_id,
+        benchmark_version="v1",
+        task_pins=(),
+        panel_key="panel@1.0",
+        adjudication_version="adj-v1",
+        evaluation_harness_version="harn-v1",
+        config_hash="conf1" + "0" * 59,
+        policy_hash="pol1" + "0" * 60,
+        analysis_plan_hash=None,
+        timestamp=datetime.now(UTC),
+        host_fingerprint="arm64",
+        seed=42,
+        agent_version=None,
+        model_identifier=None,
+        max_repetitions=max_repetitions,
+        max_attempts_per_job=3,
+        timeout_seconds=120,
+        resource_policy="res1" + "0" * 60,
+        expansion_digest="exp1" + "0" * 60,
+        parent_run_id=None,
+    )
+
+
 def test_aggregate_cell_all_accept() -> None:
     attempts = [
         _make_attempt("a1", "j0", "accept", "valid"),
@@ -521,3 +550,81 @@ def test_build_matrix_with_indirect_adjudication_and_repo_map() -> None:
     )
     assert matrix.cells[0].repository_id == "repo-custom"
     assert matrix.cells[0].adjudication_id == "adj-key-1"
+
+
+def test_aggregate_cell_unmapped_and_out_of_bound_attempts() -> None:
+    attempts = [
+        _make_attempt("a0", "j0", "accept", "valid"),
+        _make_attempt("a_unmapped", "j_unknown", "accept", "valid"),
+        _make_attempt("a_oob", "j_oob", "accept", "valid"),
+    ]
+    job_rep = {"j0": 0, "j_oob": 99}
+    cell = aggregate_cell(
+        task_key="task-1",
+        repository_id="repo-1",
+        case_id="case-1",
+        verifier_key="v-1",
+        adjudication_id="adj-1",
+        label="valid",
+        role="challenge",
+        planned_repetitions=1,
+        attempts=attempts,
+        job_repetition_map=job_rep,
+    )
+    assert "a_unmapped" in cell.excluded_attempt_ids
+    assert "a_oob" in cell.excluded_attempt_ids
+    assert cell.selected_attempt_ids == ("a0",)
+
+
+def test_aggregate_cell_stale_or_abandoned_outcome_alignment() -> None:
+    attempts = [
+        _make_attempt("a0", "j0", "accept", "valid"),
+        _make_attempt("a1", "j1", None, "invalid", disposition="abandoned"),
+    ]
+    job_rep = {"j0": 0, "j1": 1}
+    cell = aggregate_cell(
+        task_key="task-1",
+        repository_id="repo-1",
+        case_id="case-1",
+        verifier_key="v-1",
+        adjudication_id="adj-1",
+        label="valid",
+        role="challenge",
+        planned_repetitions=2,
+        attempts=attempts,
+        job_repetition_map=job_rep,
+    )
+    assert cell.repetition_outcomes == ("accept", "pending")
+    assert len(cell.repetition_outcomes) == 2
+    assert "a1" in cell.excluded_attempt_ids
+
+
+def test_build_matrix_unknown_job_raises() -> None:
+    manifest = _make_manifest()
+    job = Job(
+        job_id="j1",
+        run_id="run-1",
+        task_key="task-1",
+        case_id="case-1",
+        verifier_key="v-1",
+        repetition=0,
+        state="DONE",
+        fence=1,
+        attempt_id="a1",
+        lease_token="t",
+        worker_id="w",
+        lease_expires_ms=0,
+        attempts_started=1,
+        selected_attempt_id="a1",
+        terminal_reason=None,
+    )
+    att_unknown = _make_attempt("a2", "nonexistent_job", "accept", "valid")
+    with pytest.raises(IdentityConflict) as exc:
+        build_matrix(
+            manifest=manifest,
+            jobs=[job],
+            attempts=[att_unknown],
+            adjudications={},
+            cases={},
+        )
+    assert "references unknown job_id" in str(exc.value)

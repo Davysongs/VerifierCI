@@ -55,18 +55,20 @@ def aggregate_cell(
         r: [] for r in range(planned_repetitions)
     }
 
-    for att in attempts:
-        rep = 0
-        if job_repetition_map and att.job_id in job_repetition_map:
-            rep = job_repetition_map[att.job_id]
-        if rep not in repetition_to_attempts:
-            repetition_to_attempts[rep] = []
-        repetition_to_attempts[rep].append(att)
-
     selected_attempt_ids: list[str] = []
     excluded_attempt_ids: list[str] = []
     repetition_outcomes: list[str] = []
     diagnostic_codes: list[str] = []
+
+    for att in attempts:
+        if not job_repetition_map or att.job_id not in job_repetition_map:
+            excluded_attempt_ids.append(att.attempt_id)
+            continue
+        rep = job_repetition_map[att.job_id]
+        if rep < 0 or rep >= planned_repetitions:
+            excluded_attempt_ids.append(att.attempt_id)
+            continue
+        repetition_to_attempts[rep].append(att)
 
     for r in range(planned_repetitions):
         rep_attempts = repetition_to_attempts.get(r, [])
@@ -90,6 +92,7 @@ def aggregate_cell(
             active_or_done = rep_attempts[-1]
             if active_or_done.disposition in ("stale", "abandoned"):
                 excluded_attempt_ids.extend(a.attempt_id for a in rep_attempts)
+                repetition_outcomes.append("pending")
             else:
                 selected_attempt_ids.append(active_or_done.attempt_id)
                 repetition_outcomes.append(active_or_done.outcome or "pending")
@@ -212,10 +215,13 @@ def build_matrix(
     }
     for a in attempts:
         job = job_by_id.get(a.job_id)
-        if job:
-            k = (job.task_key, job.case_id, job.verifier_key)
-            if k in attempts_by_cell:
-                attempts_by_cell[k].append(a)
+        if not job:
+            raise IdentityConflict(
+                f"Attempt {a.attempt_id} references unknown job_id: {a.job_id}"
+            )
+        k = (job.task_key, job.case_id, job.verifier_key)
+        if k in attempts_by_cell:
+            attempts_by_cell[k].append(a)
 
     cells: list[AcceptanceCell] = []
     # Sort cell keys for deterministic output
