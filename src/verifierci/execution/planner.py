@@ -1,3 +1,4 @@
+"""Execution planning primitives."""
 """Execution planning and job expansion primitives (Phase 1).
 
 SDD Section 5: verifierci.execution.planner.
@@ -6,6 +7,7 @@ Expands a validated immutable audit into a bounded deterministic job set.
 
 from __future__ import annotations
 
+from .jobs import Job
 import hashlib
 import json
 import uuid
@@ -239,10 +241,14 @@ def build_manifest(
 
 
 def plan_jobs(task_ids: list[str]) -> list[Job]:
+    """Create stub planner jobs for task ids (Phase 1 slice)."""
     """Compatibility helper returning stub jobs for given task IDs."""
     run_id = "stub_run"
     return [
         Job(
+            job_id=f"job_{task_id}_0",
+            run_id="run_0",
+            task_key=task_id,
             job_id=job_id(run_id, tid, "case_0", "verifier_0", 0),
             run_id=run_id,
             task_key=tid,
@@ -259,5 +265,6 @@ def plan_jobs(task_ids: list[str]) -> list[Job]:
             selected_attempt_id=None,
             terminal_reason=None,
         )
+        for task_id in task_ids
         for tid in task_ids
     ]

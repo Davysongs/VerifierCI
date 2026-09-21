@@ -1,17 +1,23 @@
+"""Local adapter skeleton."""
 """Local task adapter for native VerifierCI tasks (Phase 1).
 
+from .base import VerificationAdapter
 SDD Section 5: verifierci.adapters.local.
 Imports the native manifest used by the retry fixture and hand-authored tasks.
 """
 
 from __future__ import annotations
 
+class LocalAdapter(VerificationAdapter):
+    """Placeholder adapter for local verifier execution."""
 import hashlib
 import os
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+    def name(self) -> str:
+        return "local"
 import yaml  # type: ignore[import-untyped]
 
 from verifierci.adapters.base import TaskAdapter
