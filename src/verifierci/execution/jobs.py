@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import secrets
 import sqlite3
+import time
 import uuid
 from datetime import UTC, datetime
 from typing import Literal
@@ -94,6 +95,48 @@ def get_job(conn: sqlite3.Connection, job_id: str) -> Job | None:
     if row is None:
         return None
     return _row_to_job(row)
+
+
+def _update_run_state(conn: sqlite3.Connection, run_id: str, now_ms: int) -> None:
+    """Update parent audit_run state atomically based on jobs completion."""
+    run_row = conn.execute(
+        "SELECT state, cancel_requested FROM audit_runs WHERE run_id = ?", (run_id,)
+    ).fetchone()
+    if not run_row or run_row["state"] in ("COMPLETE", "CANCELLED", "FAILED"):
+        return
+
+    stats = conn.execute(
+        """
+        SELECT 
+            COUNT(CASE WHEN state NOT IN ('DONE', 'FAILED', 'ABANDONED') THEN 1 END) as active_count,
+            COUNT(CASE WHEN state = 'FAILED' THEN 1 END) as fail_count
+        FROM jobs WHERE run_id = ?
+        """,
+        (run_id,),
+    ).fetchone()
+
+    active_count = stats["active_count"] or 0
+    fail_count = stats["fail_count"] or 0
+
+    if active_count > 0:
+        if run_row["state"] == "PLANNED":
+            conn.execute(
+                "UPDATE audit_runs SET state = 'RUNNING' WHERE run_id = ?", (run_id,)
+            )
+        return
+
+    finished_at_iso = datetime.fromtimestamp(now_ms / 1000.0, UTC).isoformat()
+    if run_row["cancel_requested"]:
+        new_state = "CANCELLED"
+    elif fail_count > 0:
+        new_state = "FAILED"
+    else:
+        new_state = "COMPLETE"
+
+    conn.execute(
+        "UPDATE audit_runs SET state = ?, finished_at = ? WHERE run_id = ?",
+        (new_state, finished_at_iso, run_id),
+    )
 
 
 def claim(
@@ -206,6 +249,8 @@ def claim(
                 """,
                 (new_attempt_id, job_id, new_fence, started_at_iso),
             )
+
+            _update_run_state(conn, parent_run_id, now_ms)
 
             return Job(
                 job_id=job_id,
@@ -566,6 +611,8 @@ def complete(
             (terminal_state, attempt.attempt_id, terminal_reason, job.job_id),
         )
 
+        _update_run_state(conn, job.run_id, now_ms)
+
         return "committed"
 
 
@@ -586,7 +633,7 @@ def reap_expired(
     with transaction(conn, immediate=True):
         rows = conn.execute(
             """
-            SELECT job_id, attempt_id, attempts_started
+            SELECT job_id, run_id, attempt_id, attempts_started
             FROM jobs
             WHERE state IN ('CLAIMED', 'RUNNING')
               AND lease_expires_ms IS NOT NULL
@@ -598,11 +645,15 @@ def reap_expired(
 
         now_iso = datetime.fromtimestamp(now_ms / 1000.0, UTC).isoformat()
         reaped: list[str] = []
+        affected_runs: set[str] = set()
 
         for row in rows:
             job_id = row["job_id"]
+            run_id = row["run_id"]
             attempt_id = row["attempt_id"]
             attempts_started = row["attempts_started"]
+
+            affected_runs.add(run_id)
 
             if attempt_id:
                 conn.execute(
@@ -648,6 +699,9 @@ def reap_expired(
 
             reaped.append(job_id)
 
+        for run_id in affected_runs:
+            _update_run_state(conn, run_id, now_ms)
+
         return tuple(reaped)
 
 
@@ -667,3 +721,5 @@ def request_cancel(conn: sqlite3.Connection, run_id: str) -> None:
             """,
             (run_id,),
         )
+
+        _update_run_state(conn, run_id, int(time.time() * 1000))
