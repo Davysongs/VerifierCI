@@ -54,15 +54,22 @@ def validate_patch(diff: bytes, allowed_paths: tuple[str, ...]) -> None:
                 code=ErrorCode.PROTECTION_ERROR.value,
             )
 
-        target_file = None
-        if line.startswith(("--- a/", "+++ b/")):
-            target_file = line[6:].strip()
+        target_files = []
+        if line.startswith(("--- a/", "--- b/", "+++ a/", "+++ b/")):
+            target_files.append(line[6:].strip())
+        elif line.startswith(("rename from ", "rename to ")):
+            target_files.append(line[12:].strip())
         elif line.startswith("diff --git a/"):
             parts = line.split(" ")
+            if len(parts) >= 3 and parts[2].startswith("a/"):
+                target_files.append(parts[2][2:].strip())
             if len(parts) >= 4 and parts[3].startswith("b/"):
-                target_file = parts[3][2:].strip()
+                target_files.append(parts[3][2:].strip())
 
-        if target_file and target_file != "/dev/null":
+        for target_file in target_files:
+            if not target_file or target_file == "/dev/null":
+                continue
+
             if target_file.startswith(("/", "\\")):
                 raise ProtectionError(
                     f"Absolute path in patch is prohibited: {target_file}",
@@ -228,22 +235,15 @@ def execute(
     start_time = time.monotonic()
 
     clean_env: dict[str, str] = {
-        "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
-        "LANG": os.environ.get("LANG", "C.UTF-8"),
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "LANG": "C.UTF-8",
         "LC_ALL": "C.UTF-8",
         "PYTHONUNBUFFERED": "1",
         "PYTHONDONTWRITEBYTECODE": "1",
         "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
-        "HOME": os.environ.get("HOME", str(workspace)),
-        "TMPDIR": os.environ.get("TMPDIR", "/tmp"),
+        "HOME": str(workspace),
+        "TMPDIR": str(workspace),
     }
-    for k in ("PATH", "LANG", "HOME", "TMPDIR"):
-        if k in os.environ:
-            clean_env[k] = os.environ[k]
-    clean_env["LC_ALL"] = "C.UTF-8"
-    clean_env["PYTHONUNBUFFERED"] = "1"
-    clean_env["PYTHONDONTWRITEBYTECODE"] = "1"
-    clean_env["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
 
     if env:
         clean_env.update(env)
@@ -352,7 +352,17 @@ def execute(
     rep_file = out_dir / report_path
     report_digest = None
     if rep_file.is_file():
-        report_digest = hashlib.sha256(rep_file.read_bytes()).hexdigest()
+        if rep_file.stat().st_size > max_capture_bytes:
+            truncated = True
+        sha = hashlib.sha256()
+        bytes_read = 0
+        with rep_file.open("rb") as f:
+            while chunk := f.read(min(8192, max_capture_bytes - bytes_read)):
+                sha.update(chunk)
+                bytes_read += len(chunk)
+                if bytes_read >= max_capture_bytes:
+                    break
+        report_digest = sha.hexdigest()
 
     resources = ResourceUsage(
         duration=elapsed,

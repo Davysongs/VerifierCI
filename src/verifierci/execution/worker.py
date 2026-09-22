@@ -51,9 +51,10 @@ def _register_artifact(conn: sqlite3.Connection, art: Artifact) -> None:
     """Register artifact in SQLite artifacts table if not already present."""
     conn.execute(
         """
-        INSERT OR IGNORE INTO artifacts (
+        INSERT INTO artifacts (
             digest, kind, size_bytes, storage_uri, media_type, access_policy, available, created_at
         ) VALUES (?, ?, ?, ?, ?, ?, 1, ?)
+        ON CONFLICT(digest) DO UPDATE SET available = 1
         """,
         (
             art.digest,
@@ -266,18 +267,11 @@ class Worker:
                     break
 
         try:
-            # 1. Transition job to RUNNING and resolve parameters under conn_lock
+            # 1. Transition job to RUNNING
             with conn_lock:
                 current_job = jobs.mark_running(
                     conn, current_job, int(time.time() * 1000)
                 )
-                snapshot_dir = self._resolve_snapshot(current_job.task_key, conn)
-                diff_bytes = self._resolve_diff(current_job.case_id, conn)
-                manifest = self._resolve_manifest(current_job.verifier_key, conn)
-
-            # Start lease heartbeat thread only after transitioning to RUNNING and resolving parameters
-            hb_thread = threading.Thread(target=_heartbeat_worker, daemon=True)
-            hb_thread.start()
 
             # 3. Prepare workspace
             workspace_ready = False
@@ -286,6 +280,16 @@ class Worker:
             capture_dir = self.work_dir / "attempts" / attempt_id / "capture"
 
             try:
+                # 2. Resolve parameters under conn_lock inside preparation try block
+                with conn_lock:
+                    snapshot_dir = self._resolve_snapshot(current_job.task_key, conn)
+                    diff_bytes = self._resolve_diff(current_job.case_id, conn)
+                    manifest = self._resolve_manifest(current_job.verifier_key, conn)
+
+                # Start lease heartbeat thread only after transitioning to RUNNING and resolving parameters
+                hb_thread = threading.Thread(target=_heartbeat_worker, daemon=True)
+                hb_thread.start()
+
                 attempt_dir = prepare_workspace(
                     job=current_job,
                     snapshot_dir=snapshot_dir,
@@ -459,7 +463,9 @@ class Worker:
             report_file = out_dir / manifest.report_path
             report_bytes = None
             if report_file.is_file():
-                report_bytes = report_file.read_bytes()
+                max_report_bytes = 16 * 1024 * 1024
+                with report_file.open("rb") as f:
+                    report_bytes = f.read(max_report_bytes)
                 art = self.artifact_store.put_bytes(
                     report_bytes,
                     max_bytes=16 * 1024 * 1024,
