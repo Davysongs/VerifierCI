@@ -33,5 +33,3 @@ class TaskAdapter(Protocol):
         ...
 
 
-class VerificationAdapter(TaskAdapter, Protocol):
-    """Compatibility protocol for verification adapters."""
