@@ -369,10 +369,13 @@ class LocalAdapter(TaskAdapter):
         env_raw_data = raw_env if isinstance(raw_env, Mapping) else {}
         if not env_raw_data and local_manifest.environment_file:
             env_p = _resolve_relative_path(root_dir, local_manifest.environment_file)
-            if env_p.is_file():
-                loaded_env = _safe_load_yaml(env_p)
-                if isinstance(loaded_env, Mapping):
-                    env_raw_data = loaded_env
+            loaded_env = _safe_load_yaml(env_p)
+            if not isinstance(loaded_env, Mapping):
+                raise ValidationError(
+                    "Environment manifest must be a mapping",
+                    code=ErrorCode.VALIDATION_ERROR.value,
+                )
+            env_raw_data = loaded_env
 
         backend = env_raw_data.get("backend", "fixture")
         if backend not in ("fixture", "docker"):
