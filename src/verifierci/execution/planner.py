@@ -29,6 +29,8 @@ def job_id(
 
     SDD Section 5: SHA-256 hex digest of the canonical ordered coordinate tuple.
     """
+    coord_str = f"{run_id}:{task_key}:{case_id}:{verifier_key}:{repetition}"
+    return hashlib.sha256(coord_str.encode("utf-8")).hexdigest()
     coord_bytes = canonical_bytes((run_id, task_key, case_id, verifier_key, repetition))
     return hashlib.sha256(coord_bytes).hexdigest()
 

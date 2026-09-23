@@ -165,6 +165,17 @@ class PytestReportParser:
             )
 
         # 2. Compare against manifest.expected_collection if specified
+        if manifest.expected_collection:
+            expected_set = set(manifest.expected_collection)
+            observed_set = set(collected_tuple)
+            if expected_set != observed_set:
+                return ParsedOutcome(
+                    outcome="invalid_evaluation",
+                    evaluation_validity="invalid",
+                    error_code=ErrorCode.COLLECTION_MISMATCH.value,
+                    report=test_report,
+                    evidence_digests=(),
+                )
         if manifest.expected_collection and sorted(
             manifest.expected_collection
         ) != sorted(collected_tuple):

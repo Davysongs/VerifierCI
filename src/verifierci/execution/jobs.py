@@ -633,6 +633,7 @@ def reap_expired(
     with transaction(conn, immediate=True):
         rows = conn.execute(
             """
+            SELECT job_id, attempt_id, attempts_started
             SELECT job_id, run_id, attempt_id, attempts_started
             FROM jobs
             WHERE state IN ('CLAIMED', 'RUNNING')

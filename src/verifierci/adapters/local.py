@@ -292,6 +292,9 @@ class LocalAdapter(TaskAdapter):
 
         # 1. Parse Contract & Requirements
         contract_path = _resolve_relative_path(root_dir, local_manifest.contract_file)
+        contract_data = (
+            _safe_load_yaml(contract_path) if contract_path.is_file() else {}
+        )
         contract_data = _safe_load_yaml(contract_path)
 
         raw_reqs = contract_data.get("requirements", [])
@@ -369,6 +372,10 @@ class LocalAdapter(TaskAdapter):
         env_raw_data = raw_env if isinstance(raw_env, Mapping) else {}
         if not env_raw_data and local_manifest.environment_file:
             env_p = _resolve_relative_path(root_dir, local_manifest.environment_file)
+            if env_p.is_file():
+                loaded_env = _safe_load_yaml(env_p)
+                if isinstance(loaded_env, Mapping):
+                    env_raw_data = loaded_env
             loaded_env = _safe_load_yaml(env_p)
             if not isinstance(loaded_env, Mapping):
                 raise ValidationError(
@@ -379,6 +386,7 @@ class LocalAdapter(TaskAdapter):
 
         backend = env_raw_data.get("backend", "fixture")
         if backend not in ("fixture", "docker"):
+            backend = "fixture"
             raise ValidationError(
                 f"Unsupported environment backend: '{backend}'.",
                 code=ErrorCode.VALIDATION_ERROR.value,
@@ -401,6 +409,16 @@ class LocalAdapter(TaskAdapter):
 
         # 3. Snapshot
         snapshot_dir = root_dir / local_manifest.snapshot_file
+        snapshot_digest = hashlib.sha256(b"empty_snapshot").hexdigest()
+        if snapshot_dir.is_dir():
+            # Hash directory content canonically with relative POSIX paths
+            hasher = hashlib.sha256()
+            for child in sorted(snapshot_dir.rglob("*")):
+                if child.is_file() and not child.is_symlink():
+                    rel_posix = child.relative_to(snapshot_dir).as_posix()
+                    hasher.update((rel_posix + "\0").encode("utf-8"))
+                    hasher.update(child.read_bytes())
+            snapshot_digest = hasher.hexdigest()
         if not snapshot_dir.is_dir():
             raise ValidationError(
                 f"Snapshot directory not found or not a directory: {snapshot_dir}",
@@ -430,6 +448,9 @@ class LocalAdapter(TaskAdapter):
 
         # 4. Verifier Manifest & Version
         verifier_path = _resolve_relative_path(root_dir, local_manifest.verifier_file)
+        verifier_data = (
+            _safe_load_yaml(verifier_path) if verifier_path.is_file() else {}
+        )
         verifier_data = _safe_load_yaml(verifier_path)
 
         v_cmd = tuple(
@@ -449,6 +470,7 @@ class LocalAdapter(TaskAdapter):
         if v_mode not in ("compatibility", "blackbox"):
             v_mode = "compatibility"
 
+        payload_digest = hashlib.sha256(b"verifier_payload").hexdigest()
         payload_digest = hashlib.sha256(verifier_path.read_bytes()).hexdigest()
         v_man_obj = VerifierManifest(
             manifest_hash="temp",
