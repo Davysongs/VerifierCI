@@ -178,6 +178,34 @@ def test_contract_hash_changes_on_requirement_change():
     assert c1.contract_hash != c2.contract_hash
 
 
+def test_contract_hash_alters_on_any_normative_field():
+    base = {
+        "task_id": "task-1",
+        "version": "1.0.0",
+        "requirement_hashes": ("a" * 64,),
+        "allowed_variation": "standard",
+        "unresolved_questions": ("Can we use backoff?",),
+        "evidence_digests": ("b" * 64,),
+    }
+    base_hash = contract_hash(base)
+    assert len(base_hash) == 64
+    assert base_hash.islower()
+
+    for key, new_val in [
+        ("task_id", "task-2"),
+        ("version", "1.0.1"),
+        ("requirement_hashes", ("c" * 64,)),
+        ("allowed_variation", "strict"),
+        ("unresolved_questions", ("Can we use jitter?",)),
+        ("evidence_digests", ("d" * 64,)),
+    ]:
+        modified = dict(base)
+        modified[key] = new_val
+        assert contract_hash(modified) != base_hash, (
+            f"contract_hash did not change when altering {key}"
+        )
+
+
 def test_compare_versions():
     assert compare_versions("1.0.0", "1.0.1") == -1
     assert compare_versions("1.0.0", "1.0.0") == 0
