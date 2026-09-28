@@ -747,3 +747,4 @@ def test_worker_run_one_manifest_resolve_failure(
     ).fetchone()
     assert att["outcome"] == "invalid_evaluation"
     assert att["evaluation_validity"] == "invalid"
+    assert att["error_code"] == ErrorCode.VALIDATION_ERROR.value

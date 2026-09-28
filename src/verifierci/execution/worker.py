@@ -281,15 +281,15 @@ class Worker:
             capture_dir = self.work_dir / "attempts" / attempt_id / "capture"
 
             try:
+                # Start lease heartbeat thread immediately inside prep try block
+                hb_thread = threading.Thread(target=_heartbeat_worker, daemon=True)
+                hb_thread.start()
+
                 # 2. Resolve parameters under conn_lock inside preparation try block
                 with conn_lock:
                     snapshot_dir = self._resolve_snapshot(current_job.task_key, conn)
                     diff_bytes = self._resolve_diff(current_job.case_id, conn)
                     manifest = self._resolve_manifest(current_job.verifier_key, conn)
-
-                # Start lease heartbeat thread only after transitioning to RUNNING and resolving parameters
-                hb_thread = threading.Thread(target=_heartbeat_worker, daemon=True)
-                hb_thread.start()
 
                 attempt_dir = prepare_workspace(
                     job=current_job,
@@ -491,21 +491,28 @@ class Worker:
                 parsed_outcome = parse_capture(capture, manifest, report_bytes)
             else:
                 err_code = capture.runtime_error or ErrorCode.INFRASTRUCTURE_ERROR.value
-                is_patch_err = (
+                outcome: Literal["invalid_evaluation", "error"]
+                if err_code == ErrorCode.VALIDATION_ERROR.value:
+                    out_error_code = ErrorCode.VALIDATION_ERROR.value
+                    outcome = "invalid_evaluation"
+                elif (
                     err_code
                     in (
                         ErrorCode.PATCH_ERROR.value,
                         ErrorCode.PROTECTION_ERROR.value,
-                        ErrorCode.VALIDATION_ERROR.value,
                     )
                     or "patch" in err_code.lower()
-                )
+                ):
+                    out_error_code = ErrorCode.PATCH_ERROR.value
+                    outcome = "invalid_evaluation"
+                else:
+                    out_error_code = err_code
+                    outcome = "error"
+
                 parsed_outcome = ParsedOutcome(
-                    outcome="invalid_evaluation" if is_patch_err else "error",
+                    outcome=outcome,
                     evaluation_validity="invalid",
-                    error_code=ErrorCode.PATCH_ERROR.value
-                    if is_patch_err
-                    else err_code,
+                    error_code=out_error_code,
                     report=None,
                     evidence_digests=tuple(evidence_digests),
                 )
