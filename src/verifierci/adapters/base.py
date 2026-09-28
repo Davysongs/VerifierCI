@@ -31,5 +31,3 @@ class TaskAdapter(Protocol):
     def validate_environment(self, bundle: ImportBundle) -> None:
         """Validate that the execution environment configuration is complete and supported."""
         ...
-
-

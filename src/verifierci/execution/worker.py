@@ -353,7 +353,7 @@ class Worker:
                 )
 
             # 4. If workspace was prepared, execute build and verification
-            if workspace_ready:
+            if workspace_ready and manifest is not None:
                 paths = {
                     "workspace": str(source_dir),
                     "verifier": str(source_dir),
@@ -503,7 +503,9 @@ class Worker:
                 parsed_outcome = ParsedOutcome(
                     outcome="invalid_evaluation" if is_patch_err else "error",
                     evaluation_validity="invalid",
-                    error_code=ErrorCode.PATCH_ERROR.value if is_patch_err else err_code,
+                    error_code=ErrorCode.PATCH_ERROR.value
+                    if is_patch_err
+                    else err_code,
                     report=None,
                     evidence_digests=tuple(evidence_digests),
                 )
