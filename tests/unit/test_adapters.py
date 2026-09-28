@@ -23,6 +23,9 @@ from verifierci.models.protocol import ImportBundle, ImportRequest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 CONTRACT_TASK_YAML = REPO_ROOT / "examples" / "retry-contract" / "task.yaml"
+(REPO_ROOT / "examples" / "retry-contract" / "source").mkdir(
+    parents=True, exist_ok=True
+)
 
 
 def test_local_adapter_satisfies_protocol() -> None:
