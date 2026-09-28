@@ -572,7 +572,7 @@ def test_worker_heartbeat_and_stdout(setup_env: tuple[Database, Path, Path]) -> 
         "import json, sys, time\n"
         "from pathlib import Path\n"
         "print('stdout logging message', flush=True)\n"
-        "time.sleep(0.12)\n"
+        "time.sleep(0.35)\n"
         "out = Path(sys.argv[1])\n"
         "data = {'tests': [{'nodeid': 't1', 'outcome': 'passed'}]}\n"
         "(out / 'report.json').write_text(json.dumps(data))\n"
@@ -595,13 +595,13 @@ def test_worker_heartbeat_and_stdout(setup_env: tuple[Database, Path, Path]) -> 
         timeout_seconds=30,
     )
 
-    # Use lease_duration_ms (50ms) shorter than execution duration (120ms)
+    # Use lease_duration_ms (200ms) shorter than execution duration (350ms)
     worker = Worker(
         work_dir=root / "work_hb",
         diff_resolver={"case1": b""},
         manifest_resolver={"verifier@1.0": manifest},
-        heartbeat_interval_seconds=0.01,
-        lease_duration_ms=50,
+        heartbeat_interval_seconds=0.03,
+        lease_duration_ms=200,
     )
 
     executed = worker.run_one(conn, run_id="run1")
@@ -702,3 +702,48 @@ def test_worker_resolve_manifest_invalid_report_path(
     )
     with pytest.raises(ValidationError):
         worker2._resolve_manifest("v2", conn)
+
+
+def test_worker_run_one_manifest_resolve_failure(
+    setup_env: tuple[Database, Path, Path],
+) -> None:
+    db, _snap_dir, root = setup_env
+    conn = db.connection
+    conn.execute(
+        """
+        INSERT INTO jobs (job_id, run_id, task_key, case_id, verifier_key, repetition, state, fence, attempts_started)
+        VALUES ('j_man_fail', 'run1', 'task1@1.0', 'case1', 'verifier@1.0', 0, 'PENDING', 0, 0)
+        """
+    )
+    bad_manifest = VerifierManifest(
+        manifest_hash="3" * 64,
+        mode="compatibility",
+        command=("cmd",),
+        build_command=(),
+        expected_collection=(),
+        parser_id="pytest-report-v1",
+        report_path="../outside.json",
+        payload_digest="c" * 64,
+        allowed_edit_paths=("*",),
+        required_pass_ids=(),
+        permitted_skips=(),
+        timeout_seconds=30,
+    )
+    worker = Worker(
+        work_dir=root / "work_man_fail",
+        diff_resolver={"case1": b""},
+        manifest_resolver={"verifier@1.0": bad_manifest},
+    )
+    executed = worker.run_one(conn, run_id="run1")
+    assert executed is True
+
+    row = conn.execute(
+        "SELECT state, selected_attempt_id FROM jobs WHERE job_id = 'j_man_fail'"
+    ).fetchone()
+    assert row["state"] == "DONE"
+    att = conn.execute(
+        "SELECT * FROM evaluation_attempts WHERE attempt_id = ?",
+        (row["selected_attempt_id"],),
+    ).fetchone()
+    assert att["outcome"] == "invalid_evaluation"
+    assert att["evaluation_validity"] == "invalid"
