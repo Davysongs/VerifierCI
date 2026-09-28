@@ -1,5 +1,6 @@
 """Execution/verifier adapters."""
 
-from .base import VerificationAdapter
+from .base import TaskAdapter
+from .local import LocalAdapter
 
-__all__ = ["VerificationAdapter"]
+__all__ = ["LocalAdapter", "TaskAdapter"]
