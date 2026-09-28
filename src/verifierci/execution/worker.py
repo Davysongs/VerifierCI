@@ -37,7 +37,7 @@ from verifierci.errors import (
     VerifierCIError,
 )
 from verifierci.execution import jobs
-from verifierci.execution.outcomes import parse_capture
+from verifierci.execution.outcomes import ParsedOutcome, parse_capture
 from verifierci.execution.sandbox import cleanup_attempt, execute, prepare_workspace
 from verifierci.models.protocol import ExecutionCapture, ResourceUsage
 from verifierci.models.result import Artifact, EvaluationAttempt
@@ -51,7 +51,6 @@ def _register_artifact(conn: sqlite3.Connection, art: Artifact) -> None:
     """Register artifact in SQLite artifacts table if not already present."""
     conn.execute(
         """
-        INSERT OR IGNORE INTO artifacts (
         INSERT INTO artifacts (
             digest, kind, size_bytes, storage_uri, media_type, access_policy, available, created_at
         ) VALUES (?, ?, ?, ?, ?, ?, 1, ?)
@@ -267,20 +266,13 @@ class Worker:
                 except Exception:  # noqa: BLE001
                     break
 
+        manifest: VerifierManifest | None = None
         try:
-            # 1. Transition job to RUNNING and resolve parameters under conn_lock
             # 1. Transition job to RUNNING
             with conn_lock:
                 current_job = jobs.mark_running(
                     conn, current_job, int(time.time() * 1000)
                 )
-                snapshot_dir = self._resolve_snapshot(current_job.task_key, conn)
-                diff_bytes = self._resolve_diff(current_job.case_id, conn)
-                manifest = self._resolve_manifest(current_job.verifier_key, conn)
-
-            # Start lease heartbeat thread only after transitioning to RUNNING and resolving parameters
-            hb_thread = threading.Thread(target=_heartbeat_worker, daemon=True)
-            hb_thread.start()
 
             # 3. Prepare workspace
             workspace_ready = False
@@ -469,33 +461,52 @@ class Worker:
                     stderr_hash = art.digest
                     evidence_digests.append(art.digest)
 
-            report_file = out_dir / manifest.report_path
             report_bytes = None
-            if report_file.is_file():
-                report_bytes = report_file.read_bytes()
-                max_report_bytes = 16 * 1024 * 1024
-                with report_file.open("rb") as f:
-                    report_bytes = f.read(max_report_bytes)
-                art = self.artifact_store.put_bytes(
-                    report_bytes,
-                    max_bytes=16 * 1024 * 1024,
-                    kind="report",
-                    access_policy="restricted",
-                    media_type="application/json",
-                )
-                with conn_lock:
-                    _register_artifact(conn, art)
-                report_digest = art.digest
-                evidence_digests.append(art.digest)
+            if manifest is not None:
+                report_file = out_dir / manifest.report_path
+                if report_file.is_file():
+                    max_report_bytes = 16 * 1024 * 1024
+                    with report_file.open("rb") as f:
+                        report_bytes = f.read(max_report_bytes)
+                    art = self.artifact_store.put_bytes(
+                        report_bytes,
+                        max_bytes=16 * 1024 * 1024,
+                        kind="report",
+                        access_policy="restricted",
+                        media_type="application/json",
+                    )
+                    with conn_lock:
+                        _register_artifact(conn, art)
+                    report_digest = art.digest
+                    evidence_digests.append(art.digest)
 
             # 6. Parse outcome
-            capture = dataclasses.replace(
-                capture,
-                stdout_hash=stdout_hash,
-                stderr_hash=stderr_hash,
-                report_digest=report_digest,
-            )
-            parsed_outcome = parse_capture(capture, manifest, report_bytes)
+            if manifest is not None:
+                capture = dataclasses.replace(
+                    capture,
+                    stdout_hash=stdout_hash,
+                    stderr_hash=stderr_hash,
+                    report_digest=report_digest,
+                )
+                parsed_outcome = parse_capture(capture, manifest, report_bytes)
+            else:
+                err_code = capture.runtime_error or ErrorCode.INFRASTRUCTURE_ERROR.value
+                is_patch_err = (
+                    err_code
+                    in (
+                        ErrorCode.PATCH_ERROR.value,
+                        ErrorCode.PROTECTION_ERROR.value,
+                        ErrorCode.VALIDATION_ERROR.value,
+                    )
+                    or "patch" in err_code.lower()
+                )
+                parsed_outcome = ParsedOutcome(
+                    outcome="invalid_evaluation" if is_patch_err else "error",
+                    evaluation_validity="invalid",
+                    error_code=ErrorCode.PATCH_ERROR.value if is_patch_err else err_code,
+                    report=None,
+                    evidence_digests=tuple(evidence_digests),
+                )
 
             test_collection: tuple[str, ...] = ()
             tests_passed: int | None = None
