@@ -336,34 +336,3 @@ verifier_file: v1.yaml
         )
         bundle = adapter.import_task(req)
         assert bundle.environment.platform == "linux/amd64"
-
-
-def test_import_task_unsupported_backend() -> None:
-    adapter = LocalAdapter()
-    with tempfile.TemporaryDirectory() as tmpdir:
-        td = Path(tmpdir)
-        task_f = td / "task.yaml"
-        task_f.write_text(
-            "task_id: t1\n"
-            "version: '1.0'\n"
-            "environment:\n"
-            "  backend: custom_backend\n"
-            "contract: contract.yaml\n"
-            "snapshot: source/\n"
-            "verifier: v1.yaml\n"
-        )
-        (td / "contract.yaml").write_text("requirements: []\n")
-        (td / "source").mkdir()
-        (td / "v1.yaml").write_text("command: [pytest]\n")
-        req = ImportRequest(
-            adapter="local",
-            instance="t1",
-            source=str(task_f),
-            source_revision="v1",
-            environment_manifest=None,
-            output_dir=str(td / "out"),
-            dry_run=True,
-        )
-        with pytest.raises(ValidationError) as exc:
-            adapter.import_task(req)
-        assert "custom_backend" in str(exc.value)

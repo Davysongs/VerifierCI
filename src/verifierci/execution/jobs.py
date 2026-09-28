@@ -196,7 +196,6 @@ def claim(
                     """,
                     (parent_run_id,),
                 )
-                _update_run_state(conn, parent_run_id, now_ms)
                 continue
 
             new_attempt_id = str(uuid.uuid4())
@@ -634,6 +633,7 @@ def reap_expired(
     with transaction(conn, immediate=True):
         rows = conn.execute(
             """
+            SELECT job_id, attempt_id, attempts_started
             SELECT job_id, run_id, attempt_id, attempts_started
             FROM jobs
             WHERE state IN ('CLAIMED', 'RUNNING')
