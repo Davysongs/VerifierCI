@@ -15,7 +15,7 @@ from typing import Any
 
 
 class ErrorCode(StrEnum):
-    """Stable machine-readable error codes defined in SDD Sections 4.2 and 7.2."""
+    """Stable machine-readable error codes defined in SDD Sections 4.2, 5, 7.2, and 7.5."""
 
     PATCH_ERROR = "PATCH_ERROR"
     BUILD_ERROR = "BUILD_ERROR"
@@ -36,6 +36,41 @@ class ErrorCode(StrEnum):
     VALIDATION_ERROR = "VALIDATION_ERROR"
     PROTECTION_ERROR = "PROTECTION_ERROR"
     INFRASTRUCTURE_ERROR = "INFRASTRUCTURE_ERROR"
+    WORKSPACE_ERROR = "WORKSPACE_ERROR"
+    SNAPSHOT_UNAVAILABLE = "SNAPSHOT_UNAVAILABLE"
+    PATH_TRAVERSAL_ERROR = "PATH_TRAVERSAL_ERROR"
+    ENVIRONMENT_INCOMPLETE = "ENVIRONMENT_INCOMPLETE"
+    ARTIFACT_IO_ERROR = "ARTIFACT_IO_ERROR"
+    MALFORMED_REPORT = "MALFORMED_REPORT"
+    CLEANUP_PENDING = "CLEANUP_PENDING"
+    UNCLASSIFIED_EXECUTION = "UNCLASSIFIED_EXECUTION"
+    EXIT_REPORT_MISMATCH = "EXIT_REPORT_MISMATCH"
+    RESULT_CONFLICT = "RESULT_CONFLICT"
+    SOURCE_UNAVAILABLE = "SOURCE_UNAVAILABLE"
+    INSTANCE_NOT_FOUND = "INSTANCE_NOT_FOUND"
+    UNSUPPORTED_SOURCE_VERSION = "UNSUPPORTED_SOURCE_VERSION"
+    UNRESOLVED_CONTRACT = "UNRESOLVED_CONTRACT"
+
+    @classmethod
+    def from_wire(cls, code: str | None) -> ErrorCode | None:
+        """Parse or normalize a wire error code string into an ErrorCode.
+
+        SDD Section 5:
+        Error codes in 4.2 and 7.2 are an enum with stable wire strings;
+        an unknown wire code becomes UNSUPPORTED_DIAGNOSTIC, never pass.
+        """
+        if code is None:
+            return None
+        try:
+            return cls(code)
+        except ValueError:
+            return cls.UNSUPPORTED_DIAGNOSTIC
+
+    @classmethod
+    def normalize_wire(cls, code: str | None) -> str | None:
+        """Normalize a wire error code string, converting unknown codes to UNSUPPORTED_DIAGNOSTIC."""
+        parsed = cls.from_wire(code)
+        return parsed.value if parsed is not None else None
 
 
 class VerifierCIError(Exception):
@@ -92,7 +127,7 @@ class LeaseLost(InfrastructureError):
     default_code = ErrorCode.LEASE_LOST.value
 
 
-def exit_category(exc: VerifierCIError | Exception) -> int:
+def exit_category(exc: VerifierCIError | Exception | None) -> int:
     """Map an exception to its canonical CLI exit category (SDD Section 6.1).
 
     0: Success / PASSED
@@ -100,6 +135,8 @@ def exit_category(exc: VerifierCIError | Exception) -> int:
     2: Input/evidence insufficient / INCONCLUSIVE (ValidationError, IdentityConflict)
     3: Infrastructure error (InfrastructureError, LeaseLost, or unexpected exception)
     """
+    if exc is None:
+        return 0
     if isinstance(exc, ProtectionError):
         return 1
     if isinstance(exc, (ValidationError, IdentityConflict)):
