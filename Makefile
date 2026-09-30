@@ -1,4 +1,4 @@
-PYTHON ?= $(shell if [ -f .venv/bin/python ]; then echo .venv/bin/python; else echo python3; fi)
+PYTHON = python3
 PYTEST = $(PYTHON) -m pytest
 
 .PHONY: help install install-dev lint test test-unit test-integration test-property test-security test-all clean

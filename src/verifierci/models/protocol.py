@@ -16,7 +16,7 @@ from datetime import datetime
 from types import MappingProxyType
 from typing import Any, Literal, TypedDict, Union, get_args, get_origin, get_type_hints
 
-from verifierci.errors import ErrorCode, ValidationError
+from verifierci.errors import ValidationError
 from verifierci.models.panel import (
     Adjudication,
     AgentRun,
@@ -399,7 +399,7 @@ class AuditOptions:
 class AuditResult:
     """Complete audit output artifact containing matrix, metrics, and gate decision."""
 
-    manifest: AuditManifest  # Full reproduction input identity.
+    manifest: Any  # AuditManifest
     matrix: AcceptanceMatrix | None  # Complete or explicitly provisional matrix.
     metrics: tuple[MetricResult, ...]  # Counts, rates, intervals and coverage.
     gate: GateDecision | None  # Null only before gating or in collect-only output.
@@ -678,8 +678,6 @@ def _instantiate_dataclass(cls: Any, data: Any) -> Any:
                 f"Missing required field '{f.name}' for {cls.__name__}."
             )
         raw_val = data[f.name]
-        if f.name in ("error_code", "diagnostic_code") and isinstance(raw_val, str):
-            raw_val = ErrorCode.normalize_wire(raw_val)
         target_type = field_types.get(f.name, Any)
         kwargs[f.name] = _convert_field(target_type, raw_val)
     return cls(**kwargs)

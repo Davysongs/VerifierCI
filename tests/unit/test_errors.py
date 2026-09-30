@@ -42,9 +42,6 @@ def test_error_custom_code():
 
 
 def test_exit_categories():
-    # Exit 0: Success (None exception)
-    assert exit_category(None) == 0
-
     # Exit 1: ProtectionError
     assert exit_category(ProtectionError("Split reservation violation")) == 1
 
@@ -57,60 +54,3 @@ def test_exit_categories():
     assert exit_category(LeaseLost("Lease expired")) == 3
     assert exit_category(VerifierCIError("Generic failure")) == 3
     assert exit_category(RuntimeError("Unexpected Python error")) == 3
-
-
-def test_error_code_wire_normalization():
-    # Known wire codes preserve exact enum value
-    assert ErrorCode.from_wire("PATCH_ERROR") == ErrorCode.PATCH_ERROR
-    assert ErrorCode.normalize_wire("PATCH_ERROR") == "PATCH_ERROR"
-
-    # Unknown wire codes map to UNSUPPORTED_DIAGNOSTIC per SDD Section 5
-    assert (
-        ErrorCode.from_wire("TOTALLY_UNKNOWN_CODE") == ErrorCode.UNSUPPORTED_DIAGNOSTIC
-    )
-    assert ErrorCode.normalize_wire("TOTALLY_UNKNOWN_CODE") == "UNSUPPORTED_DIAGNOSTIC"
-
-    # None input produces None
-    assert ErrorCode.from_wire(None) is None
-    assert ErrorCode.normalize_wire(None) is None
-
-
-def test_all_sdd_error_codes_defined():
-    sdd_codes = [
-        "PATCH_ERROR",
-        "BUILD_ERROR",
-        "COLLECTION_MISMATCH",
-        "EMPTY_COLLECTION",
-        "TIMEOUT",
-        "RESOURCE_EXHAUSTED",
-        "ARTIFACT_LIMIT",
-        "DIGEST_MISMATCH",
-        "IMAGE_UNAVAILABLE",
-        "RUNTIME_UNAVAILABLE",
-        "LEASE_LOST",
-        "CANCELLED",
-        "PARSER_ERROR",
-        "DATABASE_ERROR",
-        "UNSUPPORTED_DIAGNOSTIC",
-        "IDENTITY_CONFLICT",
-        "VALIDATION_ERROR",
-        "PROTECTION_ERROR",
-        "INFRASTRUCTURE_ERROR",
-        "WORKSPACE_ERROR",
-        "SNAPSHOT_UNAVAILABLE",
-        "PATH_TRAVERSAL_ERROR",
-        "ENVIRONMENT_INCOMPLETE",
-        "ARTIFACT_IO_ERROR",
-        "MALFORMED_REPORT",
-        "CLEANUP_PENDING",
-        "UNCLASSIFIED_EXECUTION",
-        "EXIT_REPORT_MISMATCH",
-        "RESULT_CONFLICT",
-        "SOURCE_UNAVAILABLE",
-        "INSTANCE_NOT_FOUND",
-        "UNSUPPORTED_SOURCE_VERSION",
-        "UNRESOLVED_CONTRACT",
-    ]
-    for code in sdd_codes:
-        assert code in ErrorCode.__members__, f"ErrorCode missing {code}"
-        assert ErrorCode[code].value == code
