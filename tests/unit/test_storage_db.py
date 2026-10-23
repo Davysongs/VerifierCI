@@ -838,3 +838,374 @@ def test_database_class_migrate_backup(tmp_path: Path) -> None:
     with Database(db_file) as db:
         assert db.migrate() == 1
         assert bak_file.is_file()
+
+
+def test_immutable_triggers_patch_panels() -> None:
+    conn = connect(":memory:")
+    try:
+        migrate(conn)
+        conn.execute(
+            """
+            INSERT INTO patch_panels (
+                panel_key, panel_id, version, split, membership_digest, sampling_policy, sealed_at
+            ) VALUES (
+                'p_unsealed', 'panel1', 'v1', 'development', 'mdigest1', 'policy1', NULL
+            )
+            """
+        )
+
+        # 1. Modifying core metadata on unsealed panel is blocked
+        with pytest.raises(
+            sqlite3.DatabaseError,
+            match="immutable entity patch_panels cannot be updated",
+        ):
+            conn.execute(
+                "UPDATE patch_panels SET split = 'assessment' WHERE panel_key = 'p_unsealed'"
+            )
+
+        with pytest.raises(
+            sqlite3.DatabaseError,
+            match="immutable entity patch_panels cannot be updated",
+        ):
+            conn.execute(
+                "UPDATE patch_panels SET membership_digest = 'm2' WHERE panel_key = 'p_unsealed'"
+            )
+
+        # 2. Deleting any panel is blocked
+        with pytest.raises(
+            sqlite3.DatabaseError,
+            match="immutable entity patch_panels cannot be deleted",
+        ):
+            conn.execute("DELETE FROM patch_panels WHERE panel_key = 'p_unsealed'")
+
+        # 3. Sealing an unsealed panel is permitted
+        conn.execute(
+            "UPDATE patch_panels SET sealed_at = '2026-09-22T00:00:00Z' WHERE panel_key = 'p_unsealed'"
+        )
+        assert (
+            conn.execute(
+                "SELECT sealed_at FROM patch_panels WHERE panel_key = 'p_unsealed'"
+            ).fetchone()[0]
+            == "2026-09-22T00:00:00Z"
+        )
+
+        # 4. Once sealed, updating any field (including retired_at) is blocked
+        with pytest.raises(
+            sqlite3.DatabaseError,
+            match="immutable entity patch_panels cannot be updated",
+        ):
+            conn.execute(
+                "UPDATE patch_panels SET retired_at = '2026-10-01T00:00:00Z' WHERE panel_key = 'p_unsealed'"
+            )
+
+        with pytest.raises(
+            sqlite3.DatabaseError,
+            match="immutable entity patch_panels cannot be updated",
+        ):
+            conn.execute(
+                "UPDATE patch_panels SET sealed_at = NULL WHERE panel_key = 'p_unsealed'"
+            )
+    finally:
+        conn.close()
+
+
+def test_immutable_triggers_adjudications_and_witnesses() -> None:
+    conn = connect(":memory:")
+    try:
+        migrate(conn)
+        conn.execute(
+            """
+            INSERT INTO artifacts (digest, kind, size_bytes, storage_uri, media_type, access_policy, available, created_at)
+            VALUES ('art_diff', 'diff', 10, 'file:///diff', 'text/x-diff', 'public', 1, '2026-09-21T00:00:00Z'),
+                   ('art_snap', 'snapshot', 10, 'file:///snap', 'text/plain', 'public', 1, '2026-09-21T00:00:00Z'),
+                   ('art_in', 'input', 5, 'file:///in', 'text/plain', 'public', 1, '2026-09-21T00:00:00Z'),
+                   ('art_exp', 'expected', 5, 'file:///exp', 'text/plain', 'public', 1, '2026-09-21T00:00:00Z'),
+                   ('art_obs', 'observed', 5, 'file:///obs', 'text/plain', 'public', 1, '2026-09-21T00:00:00Z')
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO environments (environment_id, backend, platform, recipe_digest, lock_digests, service_manifests, resource_policy_hash, runtime_fingerprint, mirror_uris)
+            VALUES ('env1', 'fixture', 'linux/arm64', 'rec1', '[]', '{}', 'p1', 'fp1', '[]')
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO repository_snapshots (snapshot_digest, repository_id, commit_oid, archive_uri, tree_digest, submodule_digests, lock_digests, licence, created_at)
+            VALUES ('art_snap', 'repo1', 'oid1', 'file:///repo', 'tree1', '[]', '[]', 'MIT', '2026-09-21T00:00:00Z')
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO contracts (contract_hash, task_id, version, requirement_hashes, allowed_variation, unresolved_questions, evidence_digests, created_at)
+            VALUES ('con1', 'task1', 'v1', '[]', 'none', '[]', '[]', '2026-09-21T00:00:00Z')
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO tasks (task_key, task_id, version, statement, adapter, contract_hash, snapshot_digest, environment_id, licence, provenance, eligibility, notes, created_at)
+            VALUES ('tkey1', 'task1', 'v1', 'stmt', 'fixture', 'con1', 'art_snap', 'env1', 'MIT', 'prov', 'eligible', '', '2026-09-21T00:00:00Z')
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO patch_cases (case_id, task_key, diff_digest, base_snapshot_digest, source, parent_case_ids, family_id, role, provenance_digest, licence, created_at)
+            VALUES ('case1', 'tkey1', 'art_diff', 'art_snap', 'reference', '[]', 'fam1', 'challenge', 'prov1', 'MIT', '2026-09-21T00:00:00Z')
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO adjudications (adjudication_id, case_id, contract_hash, version, label, review_status, votes, rationale, requirement_hashes, witness_ids, uncertainty, created_at)
+            VALUES ('adj1', 'case1', 'con1', 1, 'valid', 'provisional', '[]', 'ok', '[]', '[]', 'none', '2026-09-21T00:00:00Z')
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO witnesses (witness_id, case_id, contract_hash, requirement_hashes, input_digest, expected_digest, observed_digest, reproducer_command, environment_id, reviewed_by, reproduced_at)
+            VALUES ('wit1', 'case1', 'con1', '[]', 'art_in', 'art_exp', 'art_obs', '[]', 'env1', '[]', '2026-09-21T00:00:00Z')
+            """
+        )
+
+        # Adjudications cannot be updated or deleted
+        with pytest.raises(
+            sqlite3.DatabaseError,
+            match="immutable entity adjudications cannot be updated",
+        ):
+            conn.execute(
+                "UPDATE adjudications SET label = 'invalid' WHERE adjudication_id = 'adj1'"
+            )
+
+        with pytest.raises(
+            sqlite3.DatabaseError,
+            match="immutable entity adjudications cannot be deleted",
+        ):
+            conn.execute("DELETE FROM adjudications WHERE adjudication_id = 'adj1'")
+
+        # Witnesses cannot be updated or deleted
+        with pytest.raises(
+            sqlite3.DatabaseError,
+            match="immutable entity witnesses cannot be updated",
+        ):
+            conn.execute(
+                "UPDATE witnesses SET reproducer_command = '[\"echo\"]' WHERE witness_id = 'wit1'"
+            )
+
+        with pytest.raises(
+            sqlite3.DatabaseError,
+            match="immutable entity witnesses cannot be deleted",
+        ):
+            conn.execute("DELETE FROM witnesses WHERE witness_id = 'wit1'")
+    finally:
+        conn.close()
+
+
+def test_immutable_triggers_authoritative_evaluation_attempts() -> None:
+    conn = connect(":memory:")
+    try:
+        migrate(conn)
+        conn.execute(
+            """
+            INSERT INTO artifacts (digest, kind, size_bytes, storage_uri, media_type, access_policy, available, created_at)
+            VALUES ('art_snap', 'snapshot', 10, 'file:///snap', 'text/plain', 'public', 1, '2026-09-21T00:00:00Z'),
+                   ('art_diff', 'diff', 10, 'file:///diff', 'text/x-diff', 'public', 1, '2026-09-21T00:00:00Z'),
+                   ('art_pay', 'payload', 10, 'file:///pay', 'text/plain', 'public', 1, '2026-09-21T00:00:00Z')
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO environments (environment_id, backend, platform, recipe_digest, lock_digests, service_manifests, resource_policy_hash, runtime_fingerprint, mirror_uris)
+            VALUES ('env1', 'fixture', 'linux/arm64', 'rec1', '[]', '{}', 'p1', 'fp1', '[]')
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO repository_snapshots (snapshot_digest, repository_id, commit_oid, archive_uri, tree_digest, submodule_digests, lock_digests, licence, created_at)
+            VALUES ('art_snap', 'repo1', 'oid1', 'file:///repo', 'tree1', '[]', '[]', 'MIT', '2026-09-21T00:00:00Z')
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO contracts (contract_hash, task_id, version, requirement_hashes, allowed_variation, unresolved_questions, evidence_digests, created_at)
+            VALUES ('con1', 'task1', 'v1', '[]', 'none', '[]', '[]', '2026-09-21T00:00:00Z')
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO tasks (task_key, task_id, version, statement, adapter, contract_hash, snapshot_digest, environment_id, licence, provenance, eligibility, notes, created_at)
+            VALUES ('tkey1', 'task1', 'v1', 'stmt', 'fixture', 'con1', 'art_snap', 'env1', 'MIT', 'prov', 'eligible', '', '2026-09-21T00:00:00Z')
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO patch_cases (case_id, task_key, diff_digest, base_snapshot_digest, source, parent_case_ids, family_id, role, provenance_digest, licence, created_at)
+            VALUES ('case1', 'tkey1', 'art_diff', 'art_snap', 'reference', '[]', 'fam1', 'challenge', 'prov1', 'MIT', '2026-09-21T00:00:00Z')
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO verifier_manifests (manifest_hash, mode, command, build_command, expected_collection, parser_id, report_path, payload_digest, allowed_edit_paths, required_pass_ids, permitted_skips, timeout_seconds)
+            VALUES ('man1', 'compatibility', '[]', '[]', '[]', 'p1', 'out.json', 'art_pay', '[]', '[]', '[]', 60)
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO verifier_versions (verifier_key, verifier_id, version, manifest_hash, payload_digest, compatible_contract_hashes, created_at)
+            VALUES ('vkey1', 'v1', '1.0', 'man1', 'art_pay', '[]', '2026-09-21T00:00:00Z')
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO patch_panels (panel_key, panel_id, version, split, membership_digest, sampling_policy)
+            VALUES ('pkey1', 'p1', '1.0', 'assessment', 'm1', 's1')
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO audit_manifests (manifest_hash, run_id, benchmark_version, task_pins, panel_key, adjudication_version, evaluation_harness_version, config_hash, policy_hash, timestamp, host_fingerprint, max_repetitions, max_attempts_per_job, timeout_seconds, resource_policy, expansion_digest)
+            VALUES ('aman1', 'run1', 'bench1', '[]', 'pkey1', 'adjv1', 'harn1', 'conf1', 'pol1', '2026-09-21T00:00:00Z', 'host1', 1, 1, 60, 'res1', 'exp1')
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO audit_runs (run_id, manifest_hash, state, cancel_requested, created_at)
+            VALUES ('run1', 'aman1', 'RUNNING', 0, '2026-09-21T00:00:00Z')
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO jobs (job_id, run_id, task_key, case_id, verifier_key, repetition, state, fence)
+            VALUES ('job1', 'run1', 'tkey1', 'case1', 'vkey1', 0, 'RUNNING', 1)
+            """
+        )
+
+        # Insert active attempt
+        conn.execute(
+            """
+            INSERT INTO evaluation_attempts (
+                attempt_id, job_id, fence, outcome, evaluation_validity, disposition,
+                started_at, test_collection, resources, artifact_digests, capture_truncated
+            ) VALUES (
+                'att1', 'job1', 1, NULL, 'pending', 'active',
+                '2026-09-21T00:00:00Z', '[]', '{}', '[]', 0
+            )
+            """
+        )
+
+        # Active attempt can be updated
+        conn.execute(
+            "UPDATE evaluation_attempts SET tests_passed = 1 WHERE attempt_id = 'att1'"
+        )
+        assert (
+            conn.execute(
+                "SELECT tests_passed FROM evaluation_attempts WHERE attempt_id = 'att1'"
+            ).fetchone()[0]
+            == 1
+        )
+
+        # Finalise to authoritative
+        conn.execute(
+            """
+            UPDATE evaluation_attempts SET
+                outcome = 'accept',
+                evaluation_validity = 'valid',
+                disposition = 'authoritative',
+                finished_at = '2026-09-21T00:01:00Z',
+                exit_code = 0
+            WHERE attempt_id = 'att1'
+            """
+        )
+
+        # Authoritative attempt CANNOT be updated
+        with pytest.raises(
+            sqlite3.DatabaseError,
+            match="authoritative evaluation attempt cannot be updated",
+        ):
+            conn.execute(
+                "UPDATE evaluation_attempts SET exit_code = 1 WHERE attempt_id = 'att1'"
+            )
+
+        # Authoritative attempt CANNOT be deleted
+        with pytest.raises(
+            sqlite3.DatabaseError,
+            match="authoritative evaluation attempt cannot be deleted",
+        ):
+            conn.execute("DELETE FROM evaluation_attempts WHERE attempt_id = 'att1'")
+    finally:
+        conn.close()
+
+
+def test_immutable_triggers_auxiliary_tables() -> None:
+    conn = connect(":memory:")
+    try:
+        migrate(conn)
+
+        # 1. analysis_plans
+        conn.execute(
+            """
+            INSERT INTO analysis_plans (
+                plan_hash, registered_at, cohort_digest, verifier_candidates, primary_outcomes,
+                min_iar_improvement, vrr_noninferiority_margin, alpha, bootstrap_draws, seed,
+                budgets, exclusions, secondary_hypotheses, stopping_rule
+            ) VALUES (
+                'plan1', '2026-09-21T00:00:00Z', 'cohort1', '[]', '[]',
+                0.05, 0.02, 0.05, 1000, 42,
+                '{}', '[]', '[]', 'standard'
+            )
+            """
+        )
+        with pytest.raises(
+            sqlite3.DatabaseError,
+            match="immutable entity analysis_plans cannot be updated",
+        ):
+            conn.execute(
+                "UPDATE analysis_plans SET seed = 99 WHERE plan_hash = 'plan1'"
+            )
+        with pytest.raises(
+            sqlite3.DatabaseError,
+            match="immutable entity analysis_plans cannot be deleted",
+        ):
+            conn.execute("DELETE FROM analysis_plans WHERE plan_hash = 'plan1'")
+
+        # 2. benchmark_versions
+        conn.execute(
+            """
+            INSERT INTO benchmark_versions (benchmark_key, task_keys, panel_keys, release_digest, created_at)
+            VALUES ('bench1', '[]', '[]', 'rel1', '2026-09-21T00:00:00Z')
+            """
+        )
+        with pytest.raises(
+            sqlite3.DatabaseError,
+            match="immutable entity benchmark_versions cannot be updated",
+        ):
+            conn.execute(
+                "UPDATE benchmark_versions SET release_digest = 'rel2' WHERE benchmark_key = 'bench1'"
+            )
+        with pytest.raises(
+            sqlite3.DatabaseError,
+            match="immutable entity benchmark_versions cannot be deleted",
+        ):
+            conn.execute(
+                "DELETE FROM benchmark_versions WHERE benchmark_key = 'bench1'"
+            )
+
+        # 3. worker_requests
+        conn.execute(
+            """
+            INSERT INTO worker_requests (request_id, operation, request_digest, response_json, completed_at)
+            VALUES ('req1', 'claim', 'digest1', '{}', '2026-09-21T00:00:00Z')
+            """
+        )
+        with pytest.raises(
+            sqlite3.DatabaseError,
+            match="immutable entity worker_requests cannot be updated",
+        ):
+            conn.execute(
+                "UPDATE worker_requests SET operation = 'heartbeat' WHERE request_id = 'req1'"
+            )
+        with pytest.raises(
+            sqlite3.DatabaseError,
+            match="immutable entity worker_requests cannot be deleted",
+        ):
+            conn.execute("DELETE FROM worker_requests WHERE request_id = 'req1'")
+    finally:
+        conn.close()
