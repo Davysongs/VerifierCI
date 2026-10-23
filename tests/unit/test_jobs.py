@@ -552,3 +552,296 @@ def test_complete_mismatched_attempt_ownership(db: Database) -> None:
     )
     with pytest.raises(IdentityConflict):
         complete(conn, job, att, now_ms=2000)
+
+
+def test_mark_running_worker_or_attempt_mismatch(db: Database) -> None:
+    conn = db.connection
+    job = claim(conn, worker_id="w1", now_ms=1000)
+    assert job is not None
+
+    import dataclasses
+
+    # Worker mismatch
+    bad_worker_job = dataclasses.replace(job, worker_id="wrong_worker")
+    with pytest.raises(LeaseLost) as exc_info:
+        mark_running(conn, bad_worker_job, now_ms=2000)
+    assert exc_info.value.code == ErrorCode.LEASE_LOST.value
+
+    # Attempt ID mismatch
+    bad_att_job = dataclasses.replace(job, attempt_id="wrong_attempt_uuid")
+    with pytest.raises(LeaseLost) as exc_info:
+        mark_running(conn, bad_att_job, now_ms=2000)
+    assert exc_info.value.code == ErrorCode.LEASE_LOST.value
+
+
+def test_heartbeat_worker_or_attempt_mismatch(db: Database) -> None:
+    conn = db.connection
+    job = claim(conn, worker_id="w1", now_ms=1000)
+    assert job is not None
+
+    import dataclasses
+
+    # Worker mismatch
+    bad_worker_job = dataclasses.replace(job, worker_id="wrong_worker")
+    with pytest.raises(LeaseLost) as exc_info:
+        heartbeat(conn, bad_worker_job, now_ms=2000)
+    assert exc_info.value.code == ErrorCode.LEASE_LOST.value
+
+    # Attempt ID mismatch
+    bad_att_job = dataclasses.replace(job, attempt_id="wrong_attempt_uuid")
+    with pytest.raises(LeaseLost) as exc_info:
+        heartbeat(conn, bad_att_job, now_ms=2000)
+    assert exc_info.value.code == ErrorCode.LEASE_LOST.value
+
+
+def test_complete_worker_or_attempt_mismatch_stale(db: Database) -> None:
+    conn = db.connection
+    job = claim(conn, worker_id="w1", now_ms=1000)
+    assert job is not None
+
+    import dataclasses
+
+    att = EvaluationAttempt(
+        attempt_id=job.attempt_id,  # type: ignore[arg-type]
+        job_id=job.job_id,
+        fence=job.fence,
+        outcome="accept",
+        evaluation_validity="valid",
+        error_code=None,
+        disposition="authoritative",
+        started_at=datetime.fromtimestamp(1.0, UTC),
+        finished_at=datetime.fromtimestamp(2.0, UTC),
+        exit_code=0,
+        stdout_hash="out1",
+        stderr_hash="err1",
+        report_digest="rep1",
+        test_collection=("test_1",),
+        tests_passed=1,
+        tests_failed=0,
+        resources=ResourceUsage(1.0, 1.0, 0.1, 1024, None, None, None, 10),
+        artifact_digests=("out1",),
+        capture_truncated=False,
+    )
+
+    # Worker ID mismatch in Job parameter -> stale
+    bad_worker_job = dataclasses.replace(job, worker_id="wrong_worker")
+    assert complete(conn, bad_worker_job, att, now_ms=2000) == "stale"
+
+
+def test_complete_records_stale_quarantined_evidence(db: Database) -> None:
+    conn = db.connection
+    now_ms = 1_000_000
+    job = claim(conn, worker_id="w1", now_ms=now_ms)
+    assert job is not None
+
+    att = EvaluationAttempt(
+        attempt_id=job.attempt_id,  # type: ignore[arg-type]
+        job_id=job.job_id,
+        fence=job.fence,
+        outcome="accept",
+        evaluation_validity="valid",
+        error_code=None,
+        disposition="authoritative",
+        started_at=datetime.fromtimestamp(now_ms / 1000.0, UTC),
+        finished_at=datetime.fromtimestamp((now_ms + 40_000) / 1000.0, UTC),
+        exit_code=0,
+        stdout_hash="out1",
+        stderr_hash="err1",
+        report_digest="rep1",
+        test_collection=("test_1", "test_2"),
+        tests_passed=2,
+        tests_failed=0,
+        resources=ResourceUsage(40.0, 2.0, 1.5, 2048, None, None, None, 500),
+        artifact_digests=("out1", "err1"),
+        capture_truncated=False,
+    )
+
+    # Complete after lease expired -> stale
+    assert complete(conn, job, att, now_ms=now_ms + 40_000) == "stale"
+
+    # Verify attempt in DB contains quarantined stale evidence
+    row = conn.execute(
+        """
+        SELECT disposition, evaluation_validity, outcome, stdout_hash, stderr_hash,
+               report_digest, tests_passed, tests_failed, test_collection, resources
+        FROM evaluation_attempts WHERE attempt_id = ?
+        """,
+        (job.attempt_id,),
+    ).fetchone()
+    assert row is not None
+    assert row["disposition"] == "stale"
+    assert row["evaluation_validity"] == "invalid"
+    assert row["outcome"] is None
+    assert row["stdout_hash"] == "out1"
+    assert row["stderr_hash"] == "err1"
+    assert row["report_digest"] == "rep1"
+    assert row["tests_passed"] == 2
+    assert row["tests_failed"] == 0
+    import json
+
+    assert json.loads(row["test_collection"]) == ["test_1", "test_2"]
+    assert json.loads(row["resources"])["peak_memory"] == 2048
+
+
+def test_reap_expired_cancelled_run(db: Database) -> None:
+    conn = db.connection
+    now_ms = 1_000_000
+    job = claim(conn, worker_id="w1", now_ms=now_ms)
+    assert job is not None
+
+    # Request run cancellation while job is active
+    conn.execute("UPDATE audit_runs SET cancel_requested = 1 WHERE run_id = 'run1'")
+
+    # Reaper runs after lease expiry
+    reaped = reap_expired(conn, now_ms=now_ms + 35_000, max_attempts=3)
+    assert reaped == ("job1",)
+
+    # Job is FAILED with terminal_reason CANCELLED (not requeued to PENDING)
+    j = get_job(conn, "job1")
+    assert j is not None
+    assert j.state == "FAILED"
+    assert j.terminal_reason == "CANCELLED"
+
+    # Attempt marked abandoned
+    att_row = conn.execute(
+        "SELECT disposition, evaluation_validity FROM evaluation_attempts WHERE attempt_id = ?",
+        (job.attempt_id,),
+    ).fetchone()
+    assert att_row["disposition"] == "abandoned"
+    assert att_row["evaluation_validity"] == "invalid"
+
+
+def test_reap_expired_honors_manifest_max_attempts(db: Database) -> None:
+    conn = db.connection
+    now_ms = 1_000_000
+
+    # Insert a run with a manifest where max_attempts_per_job = 1
+    conn.execute(
+        """
+        INSERT INTO audit_manifests (
+            manifest_hash, run_id, benchmark_version, task_pins, panel_key,
+            adjudication_version, evaluation_harness_version, config_hash, policy_hash,
+            timestamp, host_fingerprint, max_repetitions, max_attempts_per_job,
+            timeout_seconds, resource_policy, expansion_digest
+        ) VALUES (
+            'man_single', 'run_single', 'bench1', '[]', 'panel1',
+            'adj1', 'harn1', 'conf1', 'pol1',
+            '2026-09-21T00:00:00Z', 'host1', 1, 1,
+            30, 'pol', 'exp1'
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO audit_runs (run_id, manifest_hash, state, cancel_requested, created_at)
+        VALUES ('run_single', 'man_single', 'RUNNING', 0, '2026-09-21T00:00:00Z')
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO jobs (job_id, run_id, task_key, case_id, verifier_key, repetition, state, fence, attempts_started)
+        VALUES ('job_single', 'run_single', 'tkey1', 'case1', 'vkey1', 0, 'PENDING', 0, 0)
+        """
+    )
+
+    # Attempt 1
+    job1 = claim(conn, worker_id="w1", now_ms=now_ms, run_id="run_single")
+    assert job1 is not None and job1.attempts_started == 1
+
+    # Lease expires -> attempts_started (1) == max_attempts_per_job (1) -> FAILED
+    reaped = reap_expired(conn, now_ms=now_ms + 31_000)
+    assert "job_single" in reaped
+
+    j = get_job(conn, "job_single")
+    assert j is not None
+    assert j.state == "FAILED"
+    assert j.terminal_reason == "LEASE_EXPIRED"
+
+
+def test_reap_expired_then_late_complete_records_stale(db: Database) -> None:
+    conn = db.connection
+    now_ms = 1_000_000
+    job = claim(conn, worker_id="w1", now_ms=now_ms)
+    assert job is not None
+
+    # 1. Reaper runs and marks attempt abandoned and requeues job
+    reap_expired(conn, now_ms=now_ms + 35_000, max_attempts=3)
+    assert get_job(conn, "job1").state == "PENDING"  # type: ignore[union-attr]
+
+    # 2. Worker w1 finishes late and submits attempt
+    att = EvaluationAttempt(
+        attempt_id=job.attempt_id,  # type: ignore[arg-type]
+        job_id=job.job_id,
+        fence=job.fence,
+        outcome="accept",
+        evaluation_validity="valid",
+        error_code=None,
+        disposition="authoritative",
+        started_at=datetime.fromtimestamp(now_ms / 1000.0, UTC),
+        finished_at=datetime.fromtimestamp((now_ms + 36_000) / 1000.0, UTC),
+        exit_code=0,
+        stdout_hash="out1",
+        stderr_hash="err1",
+        report_digest="rep1",
+        test_collection=("test_1",),
+        tests_passed=1,
+        tests_failed=0,
+        resources=ResourceUsage(36.0, 1.0, 0.5, 1024, None, None, None, 100),
+        artifact_digests=("out1",),
+        capture_truncated=False,
+    )
+    status = complete(conn, job, att, now_ms=now_ms + 36_000)
+    assert status == "stale"
+
+    # Attempt updated from abandoned to stale with preserved evidence
+    row = conn.execute(
+        "SELECT disposition, stdout_hash FROM evaluation_attempts WHERE attempt_id = ?",
+        (job.attempt_id,),
+    ).fetchone()
+    assert row["disposition"] == "stale"
+    assert row["stdout_hash"] == "out1"
+
+
+def test_audit_run_state_transitions_planned_to_complete(db: Database) -> None:
+    conn = db.connection
+    now_ms = 1_000_000
+
+    # Set run to PLANNED
+    conn.execute("UPDATE audit_runs SET state = 'PLANNED' WHERE run_id = 'run1'")
+
+    # Claim job -> transitions run to RUNNING
+    job = claim(conn, worker_id="w1", now_ms=now_ms)
+    assert job is not None
+    run_row = conn.execute(
+        "SELECT state FROM audit_runs WHERE run_id = 'run1'"
+    ).fetchone()
+    assert run_row["state"] == "RUNNING"
+
+    # Complete job -> transitions run to COMPLETE
+    att = EvaluationAttempt(
+        attempt_id=job.attempt_id,  # type: ignore[arg-type]
+        job_id=job.job_id,
+        fence=job.fence,
+        outcome="accept",
+        evaluation_validity="valid",
+        error_code=None,
+        disposition="authoritative",
+        started_at=datetime.fromtimestamp(now_ms / 1000.0, UTC),
+        finished_at=datetime.fromtimestamp((now_ms + 1000) / 1000.0, UTC),
+        exit_code=0,
+        stdout_hash=None,
+        stderr_hash=None,
+        report_digest=None,
+        test_collection=(),
+        tests_passed=1,
+        tests_failed=0,
+        resources=ResourceUsage(None, None, None, None, None, None, None, None),
+        artifact_digests=(),
+        capture_truncated=False,
+    )
+    complete(conn, job, att, now_ms=now_ms + 1000)
+    run_row = conn.execute(
+        "SELECT state, finished_at FROM audit_runs WHERE run_id = 'run1'"
+    ).fetchone()
+    assert run_row["state"] == "COMPLETE"
+    assert run_row["finished_at"] is not None
