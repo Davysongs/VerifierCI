@@ -19,6 +19,7 @@ from verifierci.errors import (
 )
 from verifierci.storage.db import (
     Database,
+    backup_database,
     connect,
     migrate,
     transaction,
@@ -687,3 +688,153 @@ def test_migrations_skips_non_integer_filenames(tmp_path: Path) -> None:
         assert ver == 1
     finally:
         conn.close()
+
+
+def test_connect_creates_missing_parent_directories(tmp_path: Path) -> None:
+    nested_dir = tmp_path / "deeply" / "nested" / "dir"
+    db_file = nested_dir / "target.db"
+    assert not nested_dir.exists()
+
+    conn = connect(db_file)
+    try:
+        assert nested_dir.exists()
+        conn.execute("CREATE TABLE t (id INT);")
+        conn.execute("INSERT INTO t VALUES (1);")
+        row = conn.execute("SELECT id FROM t;").fetchone()
+        assert row is not None and row[0] == 1
+    finally:
+        conn.close()
+    assert db_file.is_file()
+
+
+def test_migrate_creates_backup_pre_migration(tmp_path: Path) -> None:
+    mig_dir = tmp_path / "migrations"
+    mig_dir.mkdir()
+    (mig_dir / "001_initial.sql").write_text(
+        "CREATE TABLE t1 (x INT, name TEXT); INSERT INTO t1 VALUES (1, 'initial');",
+        encoding="utf-8",
+    )
+    (mig_dir / "002_next.sql").write_text(
+        "CREATE TABLE t2 (y INT); INSERT INTO t2 VALUES (2);",
+        encoding="utf-8",
+    )
+
+    db_file = tmp_path / "data.db"
+    bak_file = tmp_path / "data.db.bak"
+
+    conn = connect(db_file)
+    try:
+        # 1. Apply only migration 1
+        ver1 = migrate(conn, target_version=1, migrations_dir=mig_dir)
+        assert ver1 == 1
+        assert bak_file.is_file()
+
+        # In conn, add custom pre-migration-2 data to t1
+        conn.execute("INSERT INTO t1 VALUES (42, 'pre-mig2');")
+
+        # Apply migration 2
+        ver2 = migrate(conn, target_version=2, migrations_dir=mig_dir)
+        assert ver2 == 2
+
+        # Verify bak_file contains state BEFORE migration 2:
+        # - t1 has (1, 'initial') and (42, 'pre-mig2')
+        # - t2 does NOT exist
+        # - schema_migrations only has version 1
+        bak_conn = connect(bak_file)
+        try:
+            bak_tables = {
+                r[0]
+                for r in bak_conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table';"
+                ).fetchall()
+            }
+            assert "t1" in bak_tables
+            assert "t2" not in bak_tables
+            rows = bak_conn.execute("SELECT x, name FROM t1 ORDER BY x;").fetchall()
+            assert [(r[0], r[1]) for r in rows] == [(1, "initial"), (42, "pre-mig2")]
+            mig_versions = [
+                r[0]
+                for r in bak_conn.execute(
+                    "SELECT version FROM schema_migrations ORDER BY version;"
+                ).fetchall()
+            ]
+            assert mig_versions == [1]
+        finally:
+            bak_conn.close()
+
+        # Verify active conn has both t1 and t2
+        active_tables = {
+            r[0]
+            for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table';"
+            ).fetchall()
+        }
+        assert "t1" in active_tables
+        assert "t2" in active_tables
+
+        # Calling migrate again when no pending migrations exist should not alter backup
+        bak_mtime = bak_file.stat().st_mtime_ns
+        ver_repeat = migrate(conn, migrations_dir=mig_dir)
+        assert ver_repeat == 2
+        assert bak_file.stat().st_mtime_ns == bak_mtime
+    finally:
+        conn.close()
+
+
+def test_migrate_backup_disabled(tmp_path: Path) -> None:
+    mig_dir = tmp_path / "migrations"
+    mig_dir.mkdir()
+    (mig_dir / "001_initial.sql").write_text(
+        "CREATE TABLE t1 (x INT);",
+        encoding="utf-8",
+    )
+    db_file = tmp_path / "nobackup.db"
+    bak_file = tmp_path / "nobackup.db.bak"
+
+    conn = connect(db_file)
+    try:
+        ver = migrate(conn, migrations_dir=mig_dir, backup=False)
+        assert ver == 1
+        assert not bak_file.exists()
+    finally:
+        conn.close()
+
+
+def test_migrate_custom_backup_path(tmp_path: Path) -> None:
+    mig_dir = tmp_path / "migrations"
+    mig_dir.mkdir()
+    (mig_dir / "001_initial.sql").write_text(
+        "CREATE TABLE t1 (x INT);",
+        encoding="utf-8",
+    )
+    db_file = tmp_path / "custom.db"
+    custom_bak = tmp_path / "backups" / "snapshot.bak"
+
+    conn = connect(db_file)
+    try:
+        ver = migrate(conn, migrations_dir=mig_dir, backup_path=custom_bak)
+        assert ver == 1
+        assert custom_bak.is_file()
+    finally:
+        conn.close()
+
+
+def test_backup_database_rejects_identical_target(tmp_path: Path) -> None:
+    db_file = tmp_path / "same.db"
+    conn = connect(db_file)
+    try:
+        conn.execute("CREATE TABLE t (x INT);")
+        with pytest.raises(ValidationError) as exc_info:
+            backup_database(conn, db_file)
+        assert exc_info.value.code == ErrorCode.VALIDATION_ERROR.value
+    finally:
+        conn.close()
+
+
+def test_database_class_migrate_backup(tmp_path: Path) -> None:
+    db_file = tmp_path / "db_class.db"
+    bak_file = tmp_path / "db_class.db.bak"
+
+    with Database(db_file) as db:
+        assert db.migrate() == 1
+        assert bak_file.is_file()
