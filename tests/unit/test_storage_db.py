@@ -115,11 +115,11 @@ def test_migrations_initial_and_idempotent() -> None:
     conn = connect(":memory:")
     try:
         ver = migrate(conn)
-        assert ver == 1
+        assert ver == 2
 
         # Re-running is idempotent
         ver2 = migrate(conn)
-        assert ver2 == 1
+        assert ver2 == 2
 
         # Verify tables exist
         tables = {
@@ -135,6 +135,30 @@ def test_migrations_initial_and_idempotent() -> None:
         assert "evaluation_attempts" in tables
         assert "artifacts" in tables
         assert "schema_migrations" in tables
+    finally:
+        conn.close()
+
+
+def test_migration_target_version_and_incremental() -> None:
+    conn = connect(":memory:")
+    try:
+        ver1 = migrate(conn, target_version=1)
+        assert ver1 == 1
+
+        row = conn.execute(
+            "SELECT version, checksum FROM schema_migrations WHERE version = 1"
+        ).fetchone()
+        assert row is not None
+        assert row["version"] == 1
+
+        # Now migrate to latest (version 2)
+        ver2 = migrate(conn)
+        assert ver2 == 2
+
+        rows = conn.execute(
+            "SELECT version FROM schema_migrations ORDER BY version ASC"
+        ).fetchall()
+        assert [r["version"] for r in rows] == [1, 2]
     finally:
         conn.close()
 
@@ -190,7 +214,7 @@ def test_migrations_target_version(tmp_path: Path) -> None:
 def test_database_class_context_manager(tmp_path: Path) -> None:
     db_file = tmp_path / "app.db"
     with Database(db_file) as db:
-        assert db.migrate() == 1
+        assert db.migrate() == 2
         with db.transaction(immediate=True) as conn:
             conn.execute(
                 """
@@ -836,7 +860,7 @@ def test_database_class_migrate_backup(tmp_path: Path) -> None:
     bak_file = tmp_path / "db_class.db.bak"
 
     with Database(db_file) as db:
-        assert db.migrate() == 1
+        assert db.migrate() == 2
         assert bak_file.is_file()
 
 
@@ -889,13 +913,24 @@ def test_immutable_triggers_patch_panels() -> None:
             == "2026-09-22T00:00:00Z"
         )
 
-        # 4. Once sealed, updating any field (including retired_at) is blocked
+        # 4. Once sealed, updating retired_at is permitted
+        conn.execute(
+            "UPDATE patch_panels SET retired_at = '2026-10-01T00:00:00Z' WHERE panel_key = 'p_unsealed'"
+        )
+        assert (
+            conn.execute(
+                "SELECT retired_at FROM patch_panels WHERE panel_key = 'p_unsealed'"
+            ).fetchone()[0]
+            == "2026-10-01T00:00:00Z"
+        )
+
+        # But updating sealed_at or core metadata on sealed panel is blocked
         with pytest.raises(
             sqlite3.DatabaseError,
             match="immutable entity patch_panels cannot be updated",
         ):
             conn.execute(
-                "UPDATE patch_panels SET retired_at = '2026-10-01T00:00:00Z' WHERE panel_key = 'p_unsealed'"
+                "UPDATE patch_panels SET sealed_at = NULL WHERE panel_key = 'p_unsealed'"
             )
 
         with pytest.raises(
@@ -903,7 +938,7 @@ def test_immutable_triggers_patch_panels() -> None:
             match="immutable entity patch_panels cannot be updated",
         ):
             conn.execute(
-                "UPDATE patch_panels SET sealed_at = NULL WHERE panel_key = 'p_unsealed'"
+                "UPDATE patch_panels SET split = 'assessment' WHERE panel_key = 'p_unsealed'"
             )
     finally:
         conn.close()

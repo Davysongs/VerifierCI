@@ -623,9 +623,23 @@ def test_complete_worker_or_attempt_mismatch_stale(db: Database) -> None:
         capture_truncated=False,
     )
 
-    # Worker ID mismatch in Job parameter -> stale
+    # Worker ID mismatch in Job parameter -> stale without marking attempt stale
     bad_worker_job = dataclasses.replace(job, worker_id="wrong_worker")
     assert complete(conn, bad_worker_job, att, now_ms=2000) == "stale"
+    row = conn.execute(
+        "SELECT disposition FROM evaluation_attempts WHERE attempt_id = ?",
+        (job.attempt_id,),
+    ).fetchone()
+    assert row["disposition"] == "active"
+
+    # Fence mismatch -> stale and marks attempt stale
+    bad_fence_job = dataclasses.replace(job, fence=999)
+    assert complete(conn, bad_fence_job, att, now_ms=2000) == "stale"
+    row_stale = conn.execute(
+        "SELECT disposition FROM evaluation_attempts WHERE attempt_id = ?",
+        (job.attempt_id,),
+    ).fetchone()
+    assert row_stale["disposition"] == "stale"
 
 
 def test_complete_records_stale_quarantined_evidence(db: Database) -> None:
@@ -756,6 +770,75 @@ def test_reap_expired_honors_manifest_max_attempts(db: Database) -> None:
     assert j is not None
     assert j.state == "FAILED"
     assert j.terminal_reason == "LEASE_EXPIRED"
+
+
+def test_reap_expired_preserves_explicit_max_attempts_and_caches_manifest(
+    db: Database,
+) -> None:
+    conn = db.connection
+    now_ms = 1_000_000
+
+    # Insert a run with a manifest where max_attempts_per_job = 1
+    conn.execute(
+        """
+        INSERT INTO audit_manifests (
+            manifest_hash, run_id, benchmark_version, task_pins, panel_key,
+            adjudication_version, evaluation_harness_version, config_hash, policy_hash,
+            timestamp, host_fingerprint, max_repetitions, max_attempts_per_job,
+            timeout_seconds, resource_policy, expansion_digest
+        ) VALUES (
+            'man_cached', 'run_cached', 'bench1', '[]', 'panel1',
+            'adj1', 'harn1', 'conf1', 'pol1',
+            '2026-09-21T00:00:00Z', 'host1', 1, 1,
+            30, 'pol', 'exp1'
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO audit_runs (run_id, manifest_hash, state, cancel_requested, created_at)
+        VALUES ('run_cached', 'man_cached', 'RUNNING', 0, '2026-09-21T00:00:00Z')
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO jobs (job_id, run_id, task_key, case_id, verifier_key, repetition, state, fence, attempts_started)
+        VALUES ('job_c1', 'run_cached', 'tkey1', 'case1', 'vkey1', 0, 'PENDING', 0, 0),
+               ('job_c2', 'run_cached', 'tkey1', 'case1', 'vkey1', 1, 'PENDING', 0, 0)
+        """
+    )
+
+    # Claim both jobs
+    job1 = claim(conn, worker_id="w1", now_ms=now_ms, run_id="run_cached")
+    job2 = claim(conn, worker_id="w2", now_ms=now_ms, run_id="run_cached")
+    assert job1 is not None and job2 is not None
+
+    # 1: Explicit max_attempts=5 overrides manifest max_attempts_per_job (1)
+    reaped = reap_expired(conn, now_ms=now_ms + 31_000, max_attempts=5)
+    assert set(reaped) == {"job_c1", "job_c2"}
+
+    j1 = get_job(conn, "job_c1")
+    assert j1 is not None and j1.state == "PENDING"
+    j2 = get_job(conn, "job_c2")
+    assert j2 is not None and j2.state == "PENDING"
+
+    # Claim again so attempts_started becomes 2
+    job1_again = claim(
+        conn, worker_id="w1", now_ms=now_ms + 40_000, run_id="run_cached"
+    )
+    job2_again = claim(
+        conn, worker_id="w2", now_ms=now_ms + 40_000, run_id="run_cached"
+    )
+    assert job1_again is not None and job2_again is not None
+
+    # 2: Unset max_attempts resolves manifest limit (1) and caches by run_id
+    reaped_cached = reap_expired(conn, now_ms=now_ms + 75_000)
+    assert set(reaped_cached) == {"job_c1", "job_c2"}
+
+    j1_final = get_job(conn, "job_c1")
+    assert j1_final is not None and j1_final.state == "FAILED"
+    j2_final = get_job(conn, "job_c2")
+    assert j2_final is not None and j2_final.state == "FAILED"
 
 
 def test_reap_expired_then_late_complete_records_stale(db: Database) -> None:
