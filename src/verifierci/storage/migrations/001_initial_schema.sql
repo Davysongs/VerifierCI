@@ -517,15 +517,6 @@ BEGIN SELECT RAISE(ABORT, 'immutable entity adjudication_witnesses cannot be upd
 CREATE TRIGGER adjudication_witnesses_no_delete BEFORE DELETE ON adjudication_witnesses
 BEGIN SELECT RAISE(ABORT, 'immutable entity adjudication_witnesses cannot be deleted'); END;
 
--- Patch Panels
-CREATE TRIGGER patch_panels_no_core_update BEFORE UPDATE OF panel_key, panel_id, version, split, membership_digest, sampling_policy, parent_panel_key ON patch_panels
-BEGIN SELECT RAISE(ABORT, 'immutable entity patch_panels cannot be updated'); END;
-CREATE TRIGGER patch_panels_sealed_no_update BEFORE UPDATE ON patch_panels
-WHEN OLD.sealed_at IS NOT NULL
-BEGIN SELECT RAISE(ABORT, 'immutable entity patch_panels cannot be updated'); END;
-CREATE TRIGGER patch_panels_no_delete BEFORE DELETE ON patch_panels
-BEGIN SELECT RAISE(ABORT, 'immutable entity patch_panels cannot be deleted'); END;
-
 -- Panel Memberships
 CREATE TRIGGER panel_memberships_no_update BEFORE UPDATE ON panel_memberships
 BEGIN SELECT RAISE(ABORT, 'immutable entity panel_memberships cannot be updated'); END;
@@ -570,35 +561,4 @@ BEGIN SELECT RAISE(ABORT, 'authoritative evaluation attempt cannot be updated');
 CREATE TRIGGER attempts_authoritative_no_delete BEFORE DELETE ON evaluation_attempts
 WHEN OLD.disposition = 'authoritative'
 BEGIN SELECT RAISE(ABORT, 'authoritative evaluation attempt cannot be deleted'); END;
-
--- Exposure Events
-CREATE TRIGGER exposure_events_no_update BEFORE UPDATE ON exposure_events
-BEGIN SELECT RAISE(ABORT, 'immutable entity exposure_events cannot be updated'); END;
-CREATE TRIGGER exposure_events_no_delete BEFORE DELETE ON exposure_events
-BEGIN SELECT RAISE(ABORT, 'immutable entity exposure_events cannot be deleted'); END;
-
--- Analysis Plans
-CREATE TRIGGER analysis_plans_no_update BEFORE UPDATE ON analysis_plans
-BEGIN SELECT RAISE(ABORT, 'immutable entity analysis_plans cannot be updated'); END;
-CREATE TRIGGER analysis_plans_no_delete BEFORE DELETE ON analysis_plans
-BEGIN SELECT RAISE(ABORT, 'immutable entity analysis_plans cannot be deleted'); END;
-
--- Benchmark Versions
-CREATE TRIGGER benchmark_versions_no_update BEFORE UPDATE ON benchmark_versions
-BEGIN SELECT RAISE(ABORT, 'immutable entity benchmark_versions cannot be updated'); END;
-CREATE TRIGGER benchmark_versions_no_delete BEFORE DELETE ON benchmark_versions
-BEGIN SELECT RAISE(ABORT, 'immutable entity benchmark_versions cannot be deleted'); END;
-
--- Telemetry Events
-CREATE TRIGGER telemetry_events_no_update BEFORE UPDATE ON telemetry_events
-BEGIN SELECT RAISE(ABORT, 'immutable entity telemetry_events cannot be updated'); END;
-CREATE TRIGGER telemetry_events_no_delete BEFORE DELETE ON telemetry_events
-BEGIN SELECT RAISE(ABORT, 'immutable entity telemetry_events cannot be deleted'); END;
-
--- Worker Requests
-CREATE TRIGGER worker_requests_no_update BEFORE UPDATE ON worker_requests
-BEGIN SELECT RAISE(ABORT, 'immutable entity worker_requests cannot be updated'); END;
-CREATE TRIGGER worker_requests_no_delete BEFORE DELETE ON worker_requests
-BEGIN SELECT RAISE(ABORT, 'immutable entity worker_requests cannot be deleted'); END;
-
 
