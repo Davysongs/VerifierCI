@@ -599,18 +599,19 @@ def complete(
         lease_expired = (
             row["lease_expires_ms"] is None or row["lease_expires_ms"] <= now_ms
         )
-        fence_mismatch = (
-            row["fence"] != job.fence
-            or row["lease_token"] != job.lease_token
-            or (
-                row["attempt_id"] is not None
-                and row["attempt_id"] != attempt.attempt_id
-            )
-            or (job.worker_id is not None and row["worker_id"] != job.worker_id)
+        lease_identity_invalid = (
+            row["fence"] != job.fence or row["lease_token"] != job.lease_token
+        )
+        attempt_not_current = row["attempt_id"] != attempt.attempt_id
+        worker_mismatch = (
+            job.worker_id is not None and row["worker_id"] != job.worker_id
         )
 
-        if lease_expired or fence_mismatch:
+        if lease_expired or lease_identity_invalid or attempt_not_current:
             _mark_attempt_stale(conn, attempt, now_ms)
+            return "stale"
+
+        if worker_mismatch:
             return "stale"
 
         # Case 3: Live lease, fence & token match -> commit as authoritative
@@ -722,7 +723,7 @@ def reap_expired(
     conn: sqlite3.Connection,
     now_ms: int,
     *,
-    max_attempts: int = MAX_ATTEMPTS,
+    max_attempts: int | None = None,
 ) -> tuple[str, ...]:
     """Reap active jobs whose lease has expired.
 
@@ -749,6 +750,7 @@ def reap_expired(
         now_iso = datetime.fromtimestamp(now_ms / 1000.0, UTC).isoformat()
         reaped: list[str] = []
         affected_runs: set[str] = set()
+        manifest_cache: dict[str, int] = {}
 
         for row in rows:
             job_id = row["job_id"]
@@ -778,19 +780,26 @@ def reap_expired(
             ).fetchone()
             run_cancelled = bool(run_row and run_row["cancel_requested"])
 
-            effective_max_attempts = max_attempts
-            if max_attempts == MAX_ATTEMPTS:
-                manifest_row = conn.execute(
-                    """
-                    SELECT m.max_attempts_per_job
-                    FROM audit_runs r
-                    JOIN audit_manifests m ON r.manifest_hash = m.manifest_hash
-                    WHERE r.run_id = ?
-                    """,
-                    (run_id,),
-                ).fetchone()
-                if manifest_row and manifest_row["max_attempts_per_job"] is not None:
-                    effective_max_attempts = manifest_row["max_attempts_per_job"]
+            if max_attempts is not None:
+                effective_max_attempts = max_attempts
+            else:
+                if run_id not in manifest_cache:
+                    manifest_row = conn.execute(
+                        """
+                        SELECT m.max_attempts_per_job
+                        FROM audit_runs r
+                        JOIN audit_manifests m ON r.manifest_hash = m.manifest_hash
+                        WHERE r.run_id = ?
+                        """,
+                        (run_id,),
+                    ).fetchone()
+                    manifest_cache[run_id] = (
+                        manifest_row["max_attempts_per_job"]
+                        if manifest_row
+                        and manifest_row["max_attempts_per_job"] is not None
+                        else MAX_ATTEMPTS
+                    )
+                effective_max_attempts = manifest_cache[run_id]
 
             if run_cancelled:
                 conn.execute(
