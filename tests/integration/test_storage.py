@@ -79,18 +79,21 @@ def test_migration_execution_and_backup(tmp_path: Path) -> None:
 
     # Initial migration
     applied = db.migrate()
-    assert applied == 1
+    assert applied == 2
     conn = db.connection
 
-    # Verify migration record in schema_migrations
-    row = conn.execute(
-        "SELECT version, checksum, applied_at FROM schema_migrations WHERE version = 1"
-    ).fetchone()
-    assert row is not None
-    assert len(row["checksum"]) == 64
+    # Verify migration records in schema_migrations
+    rows = conn.execute(
+        "SELECT version, checksum, applied_at FROM schema_migrations ORDER BY version ASC"
+    ).fetchall()
+    assert len(rows) == 2
+    assert rows[0]["version"] == 1
+    assert len(rows[0]["checksum"]) == 64
+    assert rows[1]["version"] == 2
+    assert len(rows[1]["checksum"]) == 64
 
     # Running migrate again is idempotent and returns latest version
-    assert db.migrate() == 1
+    assert db.migrate() == 2
 
     # Foreign key check on clean schema returns no errors
     fk_errors = conn.execute("PRAGMA foreign_key_check").fetchall()

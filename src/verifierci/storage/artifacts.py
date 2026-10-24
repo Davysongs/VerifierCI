@@ -202,8 +202,9 @@ def open_verified(root: Path, digest: str) -> BinaryIO:
         )
 
     nofollow_flag = getattr(os, "O_NOFOLLOW", 0)
+    nonblock_flag = getattr(os, "O_NONBLOCK", 0)
     try:
-        fd = os.open(target_path, os.O_RDONLY | nofollow_flag)
+        fd = os.open(target_path, os.O_RDONLY | nofollow_flag | nonblock_flag)
     except OSError as exc:
         raise ProtectionError(
             f"Failed to open artifact '{digest}': {exc}",
@@ -217,6 +218,8 @@ def open_verified(root: Path, digest: str) -> BinaryIO:
                 f"Artifact '{digest}' is not a regular file: {target_path}",
                 code=ErrorCode.PROTECTION_ERROR.value,
             )
+        if hasattr(os, "set_blocking"):
+            os.set_blocking(fd, True)
         f = open(fd, "rb", closefd=True)  # noqa: SIM115
     except Exception:
         os.close(fd)

@@ -6,6 +6,7 @@ SDD Section 4.1 & Section 7.1.
 from __future__ import annotations
 
 import io
+import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -473,6 +474,23 @@ def test_open_verified_rejects_non_regular_file(tmp_path: Path) -> None:
     with pytest.raises(ProtectionError) as exc_info:
         store.open_verified(art.digest)
     assert exc_info.value.code == ErrorCode.PROTECTION_ERROR.value
+
+
+def test_open_verified_rejects_fifo(tmp_path: Path) -> None:
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("os.mkfifo not supported on this platform")
+    store = ArtifactStore(tmp_path)
+    data = b"content for fifo test"
+    art = store.put_bytes(data, max_bytes=100, kind="evidence", access_policy="public")
+
+    target_path = store.get_path(art.digest)
+    target_path.unlink()
+    os.mkfifo(target_path)
+
+    with pytest.raises(ProtectionError) as exc_info:
+        store.open_verified(art.digest)
+    assert exc_info.value.code == ErrorCode.PROTECTION_ERROR.value
+    assert "not a regular file" in str(exc_info.value)
 
 
 def test_artifact_store_path_traversal_protection(tmp_path: Path) -> None:
