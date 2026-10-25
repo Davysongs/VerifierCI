@@ -6,6 +6,7 @@ SDD Section 4.1 & Section 7.1.
 from __future__ import annotations
 
 import io
+import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -17,7 +18,8 @@ from verifierci.errors import (
     ProtectionError,
     ValidationError,
 )
-from verifierci.storage.artifacts import ArtifactStore
+from verifierci.models.protocol import SandboxPolicy
+from verifierci.storage.artifacts import ArtifactStore, register_artifact
 from verifierci.storage.db import Database
 
 
@@ -294,3 +296,271 @@ def test_garbage_collection(tmp_path: Path) -> None:
             "SELECT available FROM artifacts WHERE digest = ?", (d,)
         ).fetchone()
         assert row[0] == 0
+
+
+def test_put_bytes_and_stream_with_database_metadata(tmp_path: Path) -> None:
+    store = ArtifactStore(tmp_path / "store")
+    db = Database(":memory:")
+    db.migrate()
+
+    # 1. put_bytes with conn
+    data1 = b"artifact created with database metadata"
+    art1 = store.put_bytes(
+        data1,
+        max_bytes=1024,
+        kind="evidence",
+        access_policy="restricted",
+        media_type="text/plain",
+        conn=db.connection,
+    )
+
+    assert store.exists(art1.digest)
+    row1 = db.connection.execute(
+        "SELECT digest, kind, size_bytes, access_policy, available FROM artifacts WHERE digest = ?",
+        (art1.digest,),
+    ).fetchone()
+    assert row1 is not None
+    assert row1["digest"] == art1.digest
+    assert row1["size_bytes"] == len(data1)
+    assert row1["access_policy"] == "restricted"
+    assert row1["available"] == 1
+
+    # 2. put_stream with conn
+    data2 = b"streamed artifact with database metadata"
+    art2 = store.put_stream(
+        io.BytesIO(data2),
+        max_bytes=1024,
+        kind="report",
+        access_policy="public",
+        media_type="application/json",
+        conn=db.connection,
+    )
+    assert store.exists(art2.digest)
+    row2 = db.connection.execute(
+        "SELECT digest, kind, media_type, available FROM artifacts WHERE digest = ?",
+        (art2.digest,),
+    ).fetchone()
+    assert row2 is not None
+    assert row2["kind"] == "report"
+    assert row2["media_type"] == "application/json"
+    assert row2["available"] == 1
+
+    # 3. Re-registering / idempotent insert with conn
+    store.put_bytes(
+        data1,
+        max_bytes=1024,
+        kind="evidence",
+        access_policy="restricted",
+        conn=db.connection,
+    )
+    count = db.connection.execute(
+        "SELECT COUNT(*) FROM artifacts WHERE digest = ?", (art1.digest,)
+    ).fetchone()[0]
+    assert count == 1
+
+    # 4. Direct call to register_artifact and store.register_artifact
+    register_artifact(db.connection, art1)
+    store.register_artifact(db.connection, art2)
+
+
+def test_collect_outputs_aggregate_byte_limit(tmp_path: Path) -> None:
+    sandbox_dir = tmp_path / "sandbox"
+    sandbox_dir.mkdir()
+    store = ArtifactStore(tmp_path / "store")
+
+    # 3 files of 400 bytes each = 1200 bytes total
+    (sandbox_dir / "f1.txt").write_bytes(b"A" * 400)
+    (sandbox_dir / "f2.txt").write_bytes(b"B" * 400)
+    (sandbox_dir / "f3.txt").write_bytes(b"C" * 400)
+
+    # Per-file max_bytes is 500, but max_aggregate_bytes is 1000
+    with pytest.raises(ValidationError) as exc_info:
+        store.collect_outputs(
+            output_dir=sandbox_dir,
+            allowed=("f1.txt", "f2.txt", "f3.txt"),
+            max_bytes=500,
+            max_aggregate_bytes=1000,
+        )
+    assert exc_info.value.code == ErrorCode.ARTIFACT_LIMIT.value
+
+
+@pytest.mark.parametrize("file_limit", [4, 16 * 1024 * 1024 + 1])
+def test_collect_outputs_default_aggregate_limit(tmp_path: Path, file_limit: int) -> None:
+    sandbox_dir = tmp_path / "sandbox"
+    sandbox_dir.mkdir()
+    store = ArtifactStore(tmp_path / "store")
+    # Small per-file limits must allow multiple files; larger limits must fit
+    # at least one full-sized file even above the default aggregate cap.
+    allowed = ("first.txt", "second.txt") if file_limit == 4 else ("first.txt",)
+    for name in allowed:
+        with (sandbox_dir / name).open("wb") as stream:
+            stream.truncate(file_limit)
+
+    collected = store.collect_outputs(
+        output_dir=sandbox_dir, allowed=allowed, max_bytes=file_limit
+    )
+    assert [artifact.size_bytes for artifact in collected] == [file_limit] * len(allowed)
+
+
+@pytest.mark.parametrize("aggregate_limit", [None, 100])
+def test_collect_outputs_preserves_per_file_limit(
+    tmp_path: Path, aggregate_limit: int | None
+) -> None:
+    sandbox_dir = tmp_path / "sandbox"
+    sandbox_dir.mkdir()
+    store = ArtifactStore(tmp_path / "store")
+    (sandbox_dir / "first.txt").write_bytes(b"1234")
+    (sandbox_dir / "large.txt").write_bytes(b"12345")
+
+    with pytest.raises(ValidationError) as exc_info:
+        store.collect_outputs(
+            output_dir=sandbox_dir,
+            allowed=("first.txt", "large.txt"),
+            max_bytes=4,
+            max_aggregate_bytes=aggregate_limit,
+        )
+    assert exc_info.value.code == ErrorCode.ARTIFACT_LIMIT.value
+    assert "Aggregate" not in str(exc_info.value)
+
+
+def test_collect_outputs_with_sandbox_policy(tmp_path: Path) -> None:
+    sandbox_dir = tmp_path / "sandbox"
+    sandbox_dir.mkdir()
+    store = ArtifactStore(tmp_path / "store")
+
+    policy = SandboxPolicy(
+        policy_hash="p1",
+        cpus=1.0,
+        memory_bytes=1024 * 1024,
+        pids=32,
+        wall_seconds=30,
+        cleanup_grace_seconds=5,
+        workspace_bytes=1024 * 1024,
+        workspace_inodes=1000,
+        tmp_bytes=1024 * 1024,
+        artifact_bytes=1000,  # aggregate cap 1000 bytes
+        stream_bytes=400,  # stream cap 400 bytes
+        artifact_files=2,  # max 2 files
+        network="none",
+        seccomp_digest="none",
+        max_jobs=1000,
+        max_concurrency=1,
+    )
+
+    (sandbox_dir / "out1.txt").write_bytes(b"1" * 200)
+    (sandbox_dir / "out2.txt").write_bytes(b"2" * 200)
+    (sandbox_dir / "out3.txt").write_bytes(b"3" * 200)
+
+    # Exceeding artifact_files (3 files > limit of 2)
+    with pytest.raises(ValidationError) as exc_info:
+        store.collect_outputs(
+            output_dir=sandbox_dir,
+            allowed=("out1.txt", "out2.txt", "out3.txt"),
+            policy=policy,
+        )
+    assert exc_info.value.code == ErrorCode.ARTIFACT_LIMIT.value
+
+    # Single file exceeding stream_bytes (500 > 400)
+    (sandbox_dir / "large.txt").write_bytes(b"L" * 500)
+    with pytest.raises(ValidationError) as exc_info2:
+        store.collect_outputs(
+            output_dir=sandbox_dir,
+            allowed=("large.txt",),
+            policy=policy,
+        )
+    assert exc_info2.value.code == ErrorCode.ARTIFACT_LIMIT.value
+
+
+def test_open_verified_rejects_symlinks(tmp_path: Path) -> None:
+    store = ArtifactStore(tmp_path)
+    data = b"confidential real content"
+    art = store.put_bytes(
+        data, max_bytes=100, kind="evidence", access_policy="restricted"
+    )
+
+    target_path = store.get_path(art.digest)
+    assert target_path.is_file()
+
+    # Replace real file with a symlink to outside target
+    outside_file = tmp_path / "outside.txt"
+    outside_file.write_bytes(data)
+    target_path.unlink()
+    target_path.symlink_to(outside_file)
+
+    # 1. open_verified must reject the symlink
+    with pytest.raises(ProtectionError) as exc_info:
+        store.open_verified(art.digest)
+    assert exc_info.value.code == ErrorCode.PROTECTION_ERROR.value
+
+    # 2. get_path must reject the symlink
+    with pytest.raises(ProtectionError) as exc_info2:
+        store.get_path(art.digest)
+    assert exc_info2.value.code == ErrorCode.PROTECTION_ERROR.value
+
+    # 3. exists returns False for a symlink
+    assert store.exists(art.digest) is False
+
+
+def test_open_verified_rejects_non_regular_file(tmp_path: Path) -> None:
+    store = ArtifactStore(tmp_path)
+    data = b"content for dir test"
+    art = store.put_bytes(data, max_bytes=100, kind="evidence", access_policy="public")
+
+    target_path = store.get_path(art.digest)
+    target_path.unlink()
+    target_path.mkdir()  # make it a directory
+
+    with pytest.raises(ProtectionError) as exc_info:
+        store.open_verified(art.digest)
+    assert exc_info.value.code == ErrorCode.PROTECTION_ERROR.value
+
+
+def test_open_verified_rejects_fifo(tmp_path: Path) -> None:
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("os.mkfifo not supported on this platform")
+    store = ArtifactStore(tmp_path)
+    data = b"content for fifo test"
+    art = store.put_bytes(data, max_bytes=100, kind="evidence", access_policy="public")
+
+    target_path = store.get_path(art.digest)
+    target_path.unlink()
+    os.mkfifo(target_path)
+
+    with pytest.raises(ProtectionError) as exc_info:
+        store.open_verified(art.digest)
+    assert exc_info.value.code == ErrorCode.PROTECTION_ERROR.value
+    assert "not a regular file" in str(exc_info.value)
+
+
+def test_artifact_store_path_traversal_protection(tmp_path: Path) -> None:
+    store = ArtifactStore(tmp_path)
+
+    traversal_digest = "../" + "a" * 62
+    with pytest.raises(ValidationError) as exc_info:
+        store.open_verified(traversal_digest)
+    assert exc_info.value.code == ErrorCode.VALIDATION_ERROR.value
+
+    with pytest.raises(ValidationError) as exc_info2:
+        store.get_path(traversal_digest)
+    assert exc_info2.value.code == ErrorCode.VALIDATION_ERROR.value
+
+
+def test_collect_outputs_intermediate_symlink(tmp_path: Path) -> None:
+    sandbox_dir = tmp_path / "sandbox"
+    sandbox_dir.mkdir()
+    store = ArtifactStore(tmp_path / "store")
+
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir()
+    (outside_dir / "target.txt").write_text("outside data", encoding="utf-8")
+
+    # Link subdirectory inside sandbox to outside directory
+    (sandbox_dir / "linked_sub").symlink_to(outside_dir)
+
+    with pytest.raises(ProtectionError) as exc_info:
+        store.collect_outputs(
+            output_dir=sandbox_dir,
+            allowed=("linked_sub/target.txt",),
+            max_bytes=1024,
+        )
+    assert exc_info.value.code == ErrorCode.PROTECTION_ERROR.value

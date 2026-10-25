@@ -13,6 +13,7 @@ import hashlib
 import io
 import os
 import sqlite3
+import stat
 import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
@@ -24,6 +25,7 @@ from verifierci.errors import (
     ProtectionError,
     ValidationError,
 )
+from verifierci.models.protocol import SandboxPolicy
 from verifierci.models.result import Artifact
 
 CHUNK_SIZE = 64 * 1024  # 64 KB streaming chunks
@@ -37,6 +39,28 @@ def _validate_digest(digest: str) -> None:
         )
 
 
+def register_artifact(conn: sqlite3.Connection, artifact: Artifact) -> None:
+    """Register artifact metadata in the SQLite artifacts table if not already present."""
+    conn.execute(
+        """
+        INSERT INTO artifacts (
+            digest, kind, size_bytes, storage_uri, media_type, access_policy, retention_until, available, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)
+        ON CONFLICT(digest) DO UPDATE SET available = 1;
+        """,
+        (
+            artifact.digest,
+            artifact.kind,
+            artifact.size_bytes,
+            artifact.storage_uri,
+            artifact.media_type,
+            artifact.access_policy,
+            artifact.retention_until.isoformat() if artifact.retention_until else None,
+            artifact.created_at.isoformat(),
+        ),
+    )
+
+
 def put_stream(
     root: Path,
     stream: BinaryIO,
@@ -46,6 +70,7 @@ def put_stream(
     access_policy: Literal["public", "restricted", "sealed"],
     media_type: str = "application/octet-stream",
     retention_until: datetime | None = None,
+    conn: sqlite3.Connection | None = None,
 ) -> Artifact:
     """Atomically store a byte stream in content-addressed storage.
 
@@ -91,9 +116,15 @@ def put_stream(
         target_path = target_dir / digest[2:]
 
         # Atomic replacement into content-addressed location
+        if target_path.is_symlink() or os.path.islink(target_path):
+            raise ProtectionError(
+                f"Destination path is a symlink: {target_path}",
+                code=ErrorCode.PROTECTION_ERROR.value,
+            )
+
         os.replace(temp_path, target_path)
 
-        return Artifact(
+        artifact = Artifact(
             digest=digest,
             kind=kind,
             size_bytes=total_bytes,
@@ -104,6 +135,11 @@ def put_stream(
             available=True,
             created_at=datetime.now(UTC),
         )
+
+        if conn is not None:
+            register_artifact(conn, artifact)
+
+        return artifact
     except Exception:
         if temp_path.exists():
             try:
@@ -122,6 +158,7 @@ def put_bytes(
     access_policy: Literal["public", "restricted", "sealed"],
     media_type: str = "application/octet-stream",
     retention_until: datetime | None = None,
+    conn: sqlite3.Connection | None = None,
 ) -> Artifact:
     """Store raw in-memory bytes into content-addressed storage."""
     if len(data) > max_bytes:
@@ -137,6 +174,7 @@ def put_bytes(
         access_policy=access_policy,
         media_type=media_type,
         retention_until=retention_until,
+        conn=conn,
     )
 
 
@@ -144,18 +182,49 @@ def open_verified(root: Path, digest: str) -> BinaryIO:
     """Open an artifact and verify its SHA-256 content checksum.
 
     Returns an open, seekable BinaryIO positioned at byte 0.
+    Raises ValidationError if digest format is invalid.
+    Raises ProtectionError if symlink or non-regular file is encountered.
     Raises InfrastructureError if missing or if on-disk bytes do not match digest.
     """
     _validate_digest(digest)
     target_path = root / "sha256" / digest[:2] / digest[2:]
 
-    if not target_path.is_file():
+    if target_path.is_symlink() or os.path.islink(target_path):
+        raise ProtectionError(
+            f"Symlink rejected for artifact '{digest}' at {target_path}",
+            code=ErrorCode.PROTECTION_ERROR.value,
+        )
+
+    if not target_path.exists():
         raise InfrastructureError(
             f"Artifact '{digest}' not found at {target_path}",
             code=ErrorCode.INFRASTRUCTURE_ERROR.value,
         )
 
-    f = open(target_path, "rb")  # noqa: SIM115
+    nofollow_flag = getattr(os, "O_NOFOLLOW", 0)
+    nonblock_flag = getattr(os, "O_NONBLOCK", 0)
+    try:
+        fd = os.open(target_path, os.O_RDONLY | nofollow_flag | nonblock_flag)
+    except OSError as exc:
+        raise ProtectionError(
+            f"Failed to open artifact '{digest}': {exc}",
+            code=ErrorCode.PROTECTION_ERROR.value,
+        ) from exc
+
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise ProtectionError(
+                f"Artifact '{digest}' is not a regular file: {target_path}",
+                code=ErrorCode.PROTECTION_ERROR.value,
+            )
+        if hasattr(os, "set_blocking"):
+            os.set_blocking(fd, True)
+        f = open(fd, "rb", closefd=True)  # noqa: SIM115
+    except Exception:
+        os.close(fd)
+        raise
+
     try:
         hasher = hashlib.sha256()
         while True:
@@ -181,19 +250,41 @@ def collect_outputs(
     allowed: tuple[str, ...],
     store_root: Path,
     *,
-    max_bytes: int,
+    max_bytes: int | None = None,
+    policy: SandboxPolicy | None = None,
+    max_aggregate_bytes: int | None = None,
+    max_files: int | None = None,
     access_policy: Literal["public", "restricted", "sealed"] = "restricted",
+    conn: sqlite3.Connection | None = None,
 ) -> tuple[Artifact, ...]:
     """Collect allowlisted output files from an execution output directory.
 
+    Enforces per-stream and aggregate byte limits, and maximum file count.
     Rejects symlinks and directory traversal attempts.
     Returns stored Artifact records.
     """
     resolved_output_dir = output_dir.resolve()
+
+    if policy is not None:
+        stream_limit = policy.stream_bytes
+        aggregate_limit = policy.artifact_bytes
+        file_limit = policy.artifact_files
+    else:
+        stream_limit = max_bytes if max_bytes is not None else 16 * 1024 * 1024
+        aggregate_limit = (
+            max_aggregate_bytes
+            if max_aggregate_bytes is not None
+            else max(16 * 1024 * 1024, stream_limit)
+        )
+        file_limit = max_files if max_files is not None else 64
+
     collected: list[Artifact] = []
+    total_aggregate_bytes = 0
+    collected_files_count = 0
 
     for rel_path_str in allowed:
         p = output_dir / rel_path_str
+
         # Reject symlinks
         if os.path.islink(p) or p.is_symlink():
             raise ProtectionError(
@@ -215,6 +306,16 @@ def collect_outputs(
                 code=ErrorCode.PROTECTION_ERROR.value,
             ) from exc
 
+        # Reject intermediate symlinks
+        cur = p
+        while cur != output_dir and cur != cur.parent:
+            if cur.is_symlink() or os.path.islink(cur):
+                raise ProtectionError(
+                    f"Intermediate symlink rejected in output collection: {rel_path_str}",
+                    code=ErrorCode.PROTECTION_ERROR.value,
+                )
+            cur = cur.parent
+
         if not p.exists():
             continue
 
@@ -222,6 +323,21 @@ def collect_outputs(
             raise ProtectionError(
                 f"Output path is not a regular file: {rel_path_str}",
                 code=ErrorCode.PROTECTION_ERROR.value,
+            )
+
+        collected_files_count += 1
+        if collected_files_count > file_limit:
+            raise ValidationError(
+                f"Collected file count exceeded limit of {file_limit} files.",
+                code=ErrorCode.ARTIFACT_LIMIT.value,
+            )
+
+        file_size = p.stat().st_size
+        if total_aggregate_bytes + file_size > aggregate_limit:
+            raise ValidationError(
+                f"Aggregate artifact size exceeded limit of {aggregate_limit} bytes "
+                f"(current {total_aggregate_bytes} bytes, next file {file_size} bytes).",
+                code=ErrorCode.ARTIFACT_LIMIT.value,
             )
 
         # Infer media type and kind
@@ -244,16 +360,21 @@ def collect_outputs(
             media_type = "application/octet-stream"
             kind = "evidence"
 
+        effective_file_max_bytes = min(
+            stream_limit, aggregate_limit - total_aggregate_bytes
+        )
         with open(p, "rb") as stream:
             artifact = put_stream(
                 root=store_root,
                 stream=stream,
-                max_bytes=max_bytes,
+                max_bytes=effective_file_max_bytes,
                 kind=kind,
                 access_policy=access_policy,
                 media_type=media_type,
+                conn=conn,
             )
             collected.append(artifact)
+            total_aggregate_bytes += artifact.size_bytes
 
     return tuple(collected)
 
@@ -337,6 +458,7 @@ class ArtifactStore:
         access_policy: Literal["public", "restricted", "sealed"],
         media_type: str = "application/octet-stream",
         retention_until: datetime | None = None,
+        conn: sqlite3.Connection | None = None,
     ) -> Artifact:
         """Store a byte stream."""
         return put_stream(
@@ -347,6 +469,7 @@ class ArtifactStore:
             access_policy=access_policy,
             media_type=media_type,
             retention_until=retention_until,
+            conn=conn,
         )
 
     def put_bytes(
@@ -358,6 +481,7 @@ class ArtifactStore:
         access_policy: Literal["public", "restricted", "sealed"],
         media_type: str = "application/octet-stream",
         retention_until: datetime | None = None,
+        conn: sqlite3.Connection | None = None,
     ) -> Artifact:
         """Store in-memory bytes."""
         return put_bytes(
@@ -368,7 +492,16 @@ class ArtifactStore:
             access_policy=access_policy,
             media_type=media_type,
             retention_until=retention_until,
+            conn=conn,
         )
+
+    def register_artifact(
+        self,
+        conn: sqlite3.Connection,
+        artifact: Artifact,
+    ) -> None:
+        """Register artifact metadata in the database."""
+        register_artifact(conn, artifact)
 
     def open_verified(self, digest: str) -> BinaryIO:
         """Open an artifact and verify its checksum."""
@@ -386,20 +519,32 @@ class ArtifactStore:
         except ValidationError:
             return False
         path = self.root / "sha256" / digest[:2] / digest[2:]
+        if path.is_symlink() or os.path.islink(path):
+            return False
         return path.is_file()
 
     def get_path(self, digest: str) -> Path:
         """Return the on-disk path for a digest."""
         _validate_digest(digest)
-        return self.root / "sha256" / digest[:2] / digest[2:]
+        path = self.root / "sha256" / digest[:2] / digest[2:]
+        if path.is_symlink() or os.path.islink(path):
+            raise ProtectionError(
+                f"Symlink rejected for artifact: '{digest}'",
+                code=ErrorCode.PROTECTION_ERROR.value,
+            )
+        return path
 
     def collect_outputs(
         self,
         output_dir: Path,
         allowed: tuple[str, ...],
         *,
-        max_bytes: int,
+        max_bytes: int | None = None,
+        policy: SandboxPolicy | None = None,
+        max_aggregate_bytes: int | None = None,
+        max_files: int | None = None,
         access_policy: Literal["public", "restricted", "sealed"] = "restricted",
+        conn: sqlite3.Connection | None = None,
     ) -> tuple[Artifact, ...]:
         """Collect allowlisted outputs from an execution sandbox directory."""
         return collect_outputs(
@@ -407,7 +552,11 @@ class ArtifactStore:
             allowed=allowed,
             store_root=self.root,
             max_bytes=max_bytes,
+            policy=policy,
+            max_aggregate_bytes=max_aggregate_bytes,
+            max_files=max_files,
             access_policy=access_policy,
+            conn=conn,
         )
 
     def garbage_collect(

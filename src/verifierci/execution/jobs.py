@@ -58,24 +58,110 @@ def _row_to_job(row: sqlite3.Row) -> Job:
     )
 
 
+def _valid_artifact_digest(conn: sqlite3.Connection, digest: str | None) -> str | None:
+    """Return digest if it exists in artifacts table, else None to avoid foreign key violations."""
+    if digest is None:
+        return None
+    row = conn.execute("SELECT 1 FROM artifacts WHERE digest = ?", (digest,)).fetchone()
+    return digest if row is not None else None
+
+
 def _mark_attempt_stale(
     conn: sqlite3.Connection,
-    attempt_id: str | None,
+    attempt: EvaluationAttempt | str | None,
     now_ms: int,
 ) -> None:
-    if not attempt_id:
+    if attempt is None:
         return
     now_iso = datetime.fromtimestamp(now_ms / 1000.0, UTC).isoformat()
+    if isinstance(attempt, str):
+        conn.execute(
+            """
+            UPDATE evaluation_attempts
+            SET disposition = 'stale',
+                evaluation_validity = 'invalid',
+                outcome = NULL,
+                finished_at = ?
+            WHERE attempt_id = ? AND disposition IN ('active', 'abandoned')
+            """,
+            (now_iso, attempt),
+        )
+        return
+
+    # attempt is an EvaluationAttempt: preserve evidence as quarantined stale attempt
+    attempt_id = attempt.attempt_id
+    stdout_hash = _valid_artifact_digest(conn, attempt.stdout_hash)
+    stderr_hash = _valid_artifact_digest(conn, attempt.stderr_hash)
+    report_digest = _valid_artifact_digest(conn, attempt.report_digest)
+
+    finished_at_iso = (
+        attempt.finished_at.isoformat() if attempt.finished_at is not None else now_iso
+    )
+    test_coll_json = json.dumps(list(attempt.test_collection))
+    resources_json = json.dumps(
+        {
+            "duration": attempt.resources.duration,
+            "allocated_cpu": attempt.resources.allocated_cpu,
+            "cpu_seconds": attempt.resources.cpu_seconds,
+            "peak_memory": attempt.resources.peak_memory,
+            "model_usage": dict(attempt.resources.model_usage)
+            if attempt.resources.model_usage
+            else None,
+            "estimated_cost": attempt.resources.estimated_cost,
+            "pricing_version": attempt.resources.pricing_version,
+            "bytes_written": attempt.resources.bytes_written,
+        }
+    )
+    artifact_digests_json = json.dumps(
+        [
+            digest
+            for digest in attempt.artifact_digests
+            if _valid_artifact_digest(conn, digest) is not None
+        ]
+    )
+    capture_truncated_int = 1 if attempt.capture_truncated else 0
+
+    outcome = (
+        attempt.outcome if attempt.outcome in ("invalid_evaluation", "error") else None
+    )
+
     conn.execute(
         """
         UPDATE evaluation_attempts
         SET disposition = 'stale',
             evaluation_validity = 'invalid',
-            outcome = NULL,
-            finished_at = ?
-        WHERE attempt_id = ? AND disposition = 'active'
+            outcome = ?,
+            error_code = ?,
+            finished_at = ?,
+            exit_code = ?,
+            stdout_hash = ?,
+            stderr_hash = ?,
+            report_digest = ?,
+            test_collection = ?,
+            tests_passed = ?,
+            tests_failed = ?,
+            resources = ?,
+            artifact_digests = ?,
+            capture_truncated = ?
+        WHERE attempt_id = ? AND job_id = ? AND disposition IN ('active', 'abandoned')
         """,
-        (now_iso, attempt_id),
+        (
+            outcome,
+            attempt.error_code,
+            finished_at_iso,
+            attempt.exit_code,
+            stdout_hash,
+            stderr_hash,
+            report_digest,
+            test_coll_json,
+            attempt.tests_passed,
+            attempt.tests_failed,
+            resources_json,
+            artifact_digests_json,
+            capture_truncated_int,
+            attempt_id,
+            attempt.job_id,
+        ),
     )
 
 
@@ -108,15 +194,20 @@ def _update_run_state(conn: sqlite3.Connection, run_id: str, now_ms: int) -> Non
     stats = conn.execute(
         """
         SELECT 
-            COUNT(CASE WHEN state NOT IN ('DONE', 'FAILED', 'ABANDONED') THEN 1 END) as active_count,
+            COUNT(*) as total_count,
+            COUNT(CASE WHEN state NOT IN ('DONE', 'FAILED') THEN 1 END) as active_count,
             COUNT(CASE WHEN state = 'FAILED' THEN 1 END) as fail_count
         FROM jobs WHERE run_id = ?
         """,
         (run_id,),
     ).fetchone()
 
+    total_count = stats["total_count"] or 0
     active_count = stats["active_count"] or 0
     fail_count = stats["fail_count"] or 0
+
+    if total_count == 0:
+        return
 
     if active_count > 0:
         if run_row["state"] == "PLANNED":
@@ -290,9 +381,14 @@ def mark_running(conn: sqlite3.Connection, job: Job, now_ms: int) -> Job:
                 code=ErrorCode.LEASE_LOST.value,
             )
 
-        if row["fence"] != job.fence or row["lease_token"] != job.lease_token:
+        if (
+            row["fence"] != job.fence
+            or row["lease_token"] != job.lease_token
+            or (job.worker_id is not None and row["worker_id"] != job.worker_id)
+            or (job.attempt_id is not None and row["attempt_id"] != job.attempt_id)
+        ):
             raise LeaseLost(
-                f"Fence or lease token mismatch for job '{job.job_id}'.",
+                f"Fence, token, worker, or attempt mismatch for job '{job.job_id}'.",
                 code=ErrorCode.LEASE_LOST.value,
             )
 
@@ -345,7 +441,7 @@ def heartbeat(
         row = conn.execute(
             """
             SELECT state, fence, lease_token, lease_expires_ms, worker_id,
-                   attempts_started, selected_attempt_id, terminal_reason
+                   attempt_id, attempts_started, selected_attempt_id, terminal_reason
             FROM jobs WHERE job_id = ?
             """,
             (job.job_id,),
@@ -357,9 +453,14 @@ def heartbeat(
                 code=ErrorCode.LEASE_LOST.value,
             )
 
-        if row["fence"] != job.fence or row["lease_token"] != job.lease_token:
+        if (
+            row["fence"] != job.fence
+            or row["lease_token"] != job.lease_token
+            or (job.worker_id is not None and row["worker_id"] != job.worker_id)
+            or (job.attempt_id is not None and row["attempt_id"] != job.attempt_id)
+        ):
             raise LeaseLost(
-                f"Fence or lease token mismatch for job '{job.job_id}'.",
+                f"Fence, token, worker, or attempt mismatch for job '{job.job_id}'.",
                 code=ErrorCode.LEASE_LOST.value,
             )
 
@@ -419,7 +520,8 @@ def complete(
     with transaction(conn, immediate=True):
         row = conn.execute(
             """
-            SELECT state, fence, lease_token, lease_expires_ms, selected_attempt_id, terminal_reason
+            SELECT state, fence, lease_token, worker_id, attempt_id, lease_expires_ms,
+                   selected_attempt_id, terminal_reason
             FROM jobs WHERE job_id = ?
             """,
             (job.job_id,),
@@ -497,19 +599,26 @@ def complete(
                         )
                 return "duplicate"
             else:
-                _mark_attempt_stale(conn, attempt.attempt_id, now_ms)
+                _mark_attempt_stale(conn, attempt, now_ms)
                 return "stale"
 
-        # Case 2: Lease expired or fence/token mismatch
+        # Case 2: Lease expired or fence/token/worker/attempt mismatch
         lease_expired = (
             row["lease_expires_ms"] is None or row["lease_expires_ms"] <= now_ms
         )
-        fence_mismatch = (
+        lease_identity_invalid = (
             row["fence"] != job.fence or row["lease_token"] != job.lease_token
         )
+        attempt_not_current = row["attempt_id"] != attempt.attempt_id
+        worker_mismatch = (
+            job.worker_id is not None and row["worker_id"] != job.worker_id
+        )
 
-        if lease_expired or fence_mismatch:
-            _mark_attempt_stale(conn, attempt.attempt_id, now_ms)
+        if lease_expired or lease_identity_invalid or attempt_not_current:
+            _mark_attempt_stale(conn, attempt, now_ms)
+            return "stale"
+
+        if worker_mismatch:
             return "stale"
 
         # Case 3: Live lease, fence & token match -> commit as authoritative
@@ -621,13 +730,14 @@ def reap_expired(
     conn: sqlite3.Connection,
     now_ms: int,
     *,
-    max_attempts: int = MAX_ATTEMPTS,
+    max_attempts: int | None = None,
 ) -> tuple[str, ...]:
     """Reap active jobs whose lease has expired.
 
     Marks the active attempt as abandoned.
-    If attempts_started < max_attempts, requeues job to PENDING.
-    Else, transitions job to FAILED with terminal_reason='LEASE_EXPIRED'.
+    If run cancellation requested: transitions job to FAILED with terminal_reason='CANCELLED'.
+    Else if attempts_started < max_attempts: requeues job to PENDING.
+    Else: transitions job to FAILED with terminal_reason='LEASE_EXPIRED'.
 
     Returns tuple of reaped job_ids.
     """
@@ -647,6 +757,7 @@ def reap_expired(
         now_iso = datetime.fromtimestamp(now_ms / 1000.0, UTC).isoformat()
         reaped: list[str] = []
         affected_runs: set[str] = set()
+        manifest_cache: dict[str, int] = {}
 
         for row in rows:
             job_id = row["job_id"]
@@ -669,7 +780,49 @@ def reap_expired(
                     (now_iso, attempt_id),
                 )
 
-            if attempts_started < max_attempts:
+            # Check if parent run cancellation requested
+            run_row = conn.execute(
+                "SELECT cancel_requested FROM audit_runs WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
+            run_cancelled = bool(run_row and run_row["cancel_requested"])
+
+            if max_attempts is not None:
+                effective_max_attempts = max_attempts
+            else:
+                if run_id not in manifest_cache:
+                    manifest_row = conn.execute(
+                        """
+                        SELECT m.max_attempts_per_job
+                        FROM audit_runs r
+                        JOIN audit_manifests m ON r.manifest_hash = m.manifest_hash
+                        WHERE r.run_id = ?
+                        """,
+                        (run_id,),
+                    ).fetchone()
+                    manifest_cache[run_id] = (
+                        manifest_row["max_attempts_per_job"]
+                        if manifest_row
+                        and manifest_row["max_attempts_per_job"] is not None
+                        else MAX_ATTEMPTS
+                    )
+                effective_max_attempts = manifest_cache[run_id]
+
+            if run_cancelled:
+                conn.execute(
+                    """
+                    UPDATE jobs SET
+                        state = 'FAILED',
+                        attempt_id = NULL,
+                        lease_token = NULL,
+                        worker_id = NULL,
+                        lease_expires_ms = NULL,
+                        terminal_reason = 'CANCELLED'
+                    WHERE job_id = ?
+                    """,
+                    (job_id,),
+                )
+            elif attempts_started < effective_max_attempts:
                 conn.execute(
                     """
                     UPDATE jobs SET
@@ -706,8 +859,15 @@ def reap_expired(
         return tuple(reaped)
 
 
-def request_cancel(conn: sqlite3.Connection, run_id: str) -> None:
+def request_cancel(
+    conn: sqlite3.Connection,
+    run_id: str,
+    *,
+    now_ms: int | None = None,
+) -> None:
     """Request cancellation for an audit run and fail any pending jobs."""
+    if now_ms is None:
+        now_ms = int(time.time() * 1000)
     with transaction(conn, immediate=True):
         conn.execute(
             "UPDATE audit_runs SET cancel_requested = 1 WHERE run_id = ?",
@@ -723,4 +883,4 @@ def request_cancel(conn: sqlite3.Connection, run_id: str) -> None:
             (run_id,),
         )
 
-        _update_run_state(conn, run_id, int(time.time() * 1000))
+        _update_run_state(conn, run_id, now_ms)

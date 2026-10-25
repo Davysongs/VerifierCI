@@ -24,6 +24,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from types import TracebackType
 from typing import Self
+from urllib.parse import urlparse
 
 from verifierci.errors import (
     ErrorCode,
@@ -39,9 +40,22 @@ def connect(path: Path | str = ":memory:") -> sqlite3.Connection:
     """Create and configure a SQLite connection according to SDD Section 4.1.
 
     Enforces foreign keys, busy timeout, full synchronisation, WAL mode for disk databases,
-    and disables dynamic extension loading.
+    and disables dynamic extension loading. Ensures parent directories exist for disk paths.
     """
     path_str = str(path)
+    is_memory = (
+        path_str == ":memory:"
+        or path_str.startswith("file::memory:")
+        or "?mode=memory" in path_str
+    )
+    if not is_memory:
+        if path_str.startswith("file:"):
+            parsed_path = urlparse(path_str).path
+            if parsed_path:
+                Path(parsed_path).parent.mkdir(parents=True, exist_ok=True)
+        else:
+            Path(path_str).parent.mkdir(parents=True, exist_ok=True)
+
     conn = sqlite3.connect(
         path_str,
         isolation_level=None,  # Explicit transaction control
@@ -53,8 +67,8 @@ def connect(path: Path | str = ":memory:") -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys = ON;")
     conn.execute("PRAGMA busy_timeout = 5000;")
     conn.execute("PRAGMA synchronous = FULL;")
+    conn.execute("PRAGMA recursive_triggers = ON;")
 
-    is_memory = path_str == ":memory:" or path_str.startswith("file::memory:")
     if not is_memory:
         conn.execute("PRAGMA journal_mode = WAL;")
 
@@ -85,6 +99,7 @@ def transaction(
 
     timeout_ms = max(1, int(timeout * 1000))
     conn.execute(f"PRAGMA busy_timeout = {timeout_ms};")
+    conn.execute("PRAGMA recursive_triggers = ON;")
     try:
         while True:
             try:
@@ -121,16 +136,66 @@ def transaction(
             pass
 
 
+def _get_db_file_path(conn: sqlite3.Connection) -> Path | None:
+    """Retrieve the filesystem path for the main database, or None if in-memory."""
+    try:
+        rows = conn.execute("PRAGMA database_list;").fetchall()
+        for row in rows:
+            name = row["name"] if isinstance(row, sqlite3.Row) else row[1]
+            file_path = row["file"] if isinstance(row, sqlite3.Row) else row[2]
+            if name == "main" and file_path:
+                return Path(file_path)
+    except sqlite3.Error:
+        pass
+    return None
+
+
+def backup_database(conn: sqlite3.Connection, backup_path: Path | str) -> None:
+    """Create a consistent online backup of the database to backup_path using SQLite's backup API."""
+    target_path = Path(backup_path)
+    db_file = _get_db_file_path(conn)
+    if db_file is not None:
+        try:
+            if target_path.resolve() == db_file.resolve():
+                raise ValidationError(
+                    f"Backup destination cannot be the same as the source database: {target_path}",
+                    code=ErrorCode.VALIDATION_ERROR.value,
+                )
+        except OSError:
+            pass
+
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        for ext in ("", "-wal", "-shm"):
+            Path(f"{target_path}{ext}").unlink(missing_ok=True)
+
+        backup_conn = sqlite3.connect(str(target_path))
+        try:
+            conn.backup(backup_conn)
+        finally:
+            backup_conn.close()
+    except Exception as exc:
+        if isinstance(exc, ValidationError):
+            raise
+        raise InfrastructureError(
+            f"Failed to create pre-migration database backup at {target_path}: {exc}",
+            code=ErrorCode.DATABASE_ERROR.value,
+        ) from exc
+
+
 def migrate(
     conn: sqlite3.Connection,
     *,
     target_version: int | None = None,
     migrations_dir: Path | None = None,
+    backup: bool = True,
+    backup_path: Path | str | None = None,
 ) -> int:
     """Discover and apply numbered schema migrations in sorted order.
 
     Each migration is executed within an atomic transaction alongside its tracking record.
-    Verifies checksums of already-applied migrations and runs PRAGMA foreign_key_check.
+    Verifies checksums of already-applied migrations, creates a pre-migration backup for disk
+    databases if pending migrations exist and backup=True, and runs PRAGMA foreign_key_check.
 
     Returns the latest applied schema version.
     """
@@ -160,6 +225,8 @@ def migrate(
     migration_files = sorted(migrations_dir.glob("*.sql"))
     latest_version = max(applied.keys()) if applied else 0
 
+    pending: list[tuple[int, Path, str, str]] = []
+
     for file_path in migration_files:
         prefix = file_path.stem.split("_")[0]
         try:
@@ -183,6 +250,20 @@ def migrate(
         if target_version is not None and version > target_version:
             break
 
+        pending.append((version, file_path, content, checksum))
+
+    if not pending:
+        return latest_version
+
+    if backup:
+        db_file = _get_db_file_path(conn)
+        if db_file is not None and db_file.exists():
+            target_bak = (
+                Path(backup_path) if backup_path is not None else Path(f"{db_file}.bak")
+            )
+            backup_database(conn, target_bak)
+
+    for version, file_path, content, checksum in pending:
         now_iso = datetime.now(UTC).isoformat()
         script = f"""BEGIN IMMEDIATE;
 {content}
@@ -263,12 +344,16 @@ class Database:
         *,
         target_version: int | None = None,
         migrations_dir: Path | None = None,
+        backup: bool = True,
+        backup_path: Path | str | None = None,
     ) -> int:
         """Apply migrations to the active connection."""
         return migrate(
             self.connection,
             target_version=target_version,
             migrations_dir=migrations_dir,
+            backup=backup,
+            backup_path=backup_path,
         )
 
     def close(self) -> None:
