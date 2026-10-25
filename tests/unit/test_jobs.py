@@ -642,11 +642,15 @@ def test_complete_worker_or_attempt_mismatch_stale(db: Database) -> None:
     assert row_stale["disposition"] == "stale"
 
 
-def test_complete_records_stale_quarantined_evidence(db: Database) -> None:
+@pytest.mark.parametrize("reaped", [False, True])
+def test_complete_records_stale_quarantined_evidence(db: Database, reaped: bool) -> None:
     conn = db.connection
     now_ms = 1_000_000
     job = claim(conn, worker_id="w1", now_ms=now_ms)
     assert job is not None
+
+    if reaped:
+        reap_expired(conn, now_ms=now_ms + 35_000)
 
     att = EvaluationAttempt(
         attempt_id=job.attempt_id,  # type: ignore[arg-type]
@@ -666,7 +670,7 @@ def test_complete_records_stale_quarantined_evidence(db: Database) -> None:
         tests_passed=2,
         tests_failed=0,
         resources=ResourceUsage(40.0, 2.0, 1.5, 2048, None, None, None, 500),
-        artifact_digests=("out1", "err1"),
+        artifact_digests=("missing", "out1", "unregistered", "err1"),
         capture_truncated=False,
     )
 
@@ -677,7 +681,8 @@ def test_complete_records_stale_quarantined_evidence(db: Database) -> None:
     row = conn.execute(
         """
         SELECT disposition, evaluation_validity, outcome, stdout_hash, stderr_hash,
-               report_digest, tests_passed, tests_failed, test_collection, resources
+               report_digest, tests_passed, tests_failed, test_collection, resources,
+               artifact_digests
         FROM evaluation_attempts WHERE attempt_id = ?
         """,
         (job.attempt_id,),
@@ -695,6 +700,64 @@ def test_complete_records_stale_quarantined_evidence(db: Database) -> None:
 
     assert json.loads(row["test_collection"]) == ["test_1", "test_2"]
     assert json.loads(row["resources"])["peak_memory"] == 2048
+    assert json.loads(row["artifact_digests"]) == ["out1", "err1"]
+
+
+@pytest.mark.parametrize("terminal_job", [False, True])
+def test_complete_stale_does_not_update_another_jobs_attempt(
+    db: Database, terminal_job: bool
+) -> None:
+    conn = db.connection
+    job = claim(conn, worker_id="w1", now_ms=1000)
+    assert job is not None
+    conn.execute(
+        """
+        INSERT INTO jobs (job_id, run_id, task_key, case_id, verifier_key,
+                          repetition, state, fence, attempts_started)
+        VALUES ('job2', 'run1', 'tkey1', 'case1', 'vkey1', 1, 'PENDING', 0, 0)
+        """
+    )
+    other_job = claim(conn, worker_id="w2", now_ms=2000)
+    assert other_job is not None and other_job.job_id == "job2"
+    before = dict(
+        conn.execute(
+            "SELECT * FROM evaluation_attempts WHERE attempt_id = ?",
+            (other_job.attempt_id,),
+        ).fetchone()
+    )
+    if terminal_job:
+        conn.execute("UPDATE jobs SET state = 'FAILED' WHERE job_id = ?", (job.job_id,))
+
+    attempt = EvaluationAttempt(
+        attempt_id=other_job.attempt_id,  # type: ignore[arg-type]
+        job_id=job.job_id,
+        fence=job.fence,
+        outcome="accept",
+        evaluation_validity="valid",
+        error_code=None,
+        disposition="authoritative",
+        started_at=datetime.fromtimestamp(1.0, UTC),
+        finished_at=datetime.fromtimestamp(40.0, UTC),
+        exit_code=0,
+        stdout_hash="out1",
+        stderr_hash=None,
+        report_digest=None,
+        test_collection=(),
+        tests_passed=0,
+        tests_failed=0,
+        resources=ResourceUsage(None, None, None, None, None, None, None, None),
+        artifact_digests=("out1",),
+        capture_truncated=False,
+    )
+
+    assert complete(conn, job, attempt, now_ms=40_000) == "stale"
+    after = dict(
+        conn.execute(
+            "SELECT * FROM evaluation_attempts WHERE attempt_id = ?",
+            (other_job.attempt_id,),
+        ).fetchone()
+    )
+    assert after == before
 
 
 def test_reap_expired_cancelled_run(db: Database) -> None:

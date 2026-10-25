@@ -384,6 +384,45 @@ def test_collect_outputs_aggregate_byte_limit(tmp_path: Path) -> None:
     assert exc_info.value.code == ErrorCode.ARTIFACT_LIMIT.value
 
 
+@pytest.mark.parametrize("file_limit", [4, 16 * 1024 * 1024 + 1])
+def test_collect_outputs_default_aggregate_limit(tmp_path: Path, file_limit: int) -> None:
+    sandbox_dir = tmp_path / "sandbox"
+    sandbox_dir.mkdir()
+    store = ArtifactStore(tmp_path / "store")
+    # Small per-file limits must allow multiple files; larger limits must fit
+    # at least one full-sized file even above the default aggregate cap.
+    allowed = ("first.txt", "second.txt") if file_limit == 4 else ("first.txt",)
+    for name in allowed:
+        with (sandbox_dir / name).open("wb") as stream:
+            stream.truncate(file_limit)
+
+    collected = store.collect_outputs(
+        output_dir=sandbox_dir, allowed=allowed, max_bytes=file_limit
+    )
+    assert [artifact.size_bytes for artifact in collected] == [file_limit] * len(allowed)
+
+
+@pytest.mark.parametrize("aggregate_limit", [None, 100])
+def test_collect_outputs_preserves_per_file_limit(
+    tmp_path: Path, aggregate_limit: int | None
+) -> None:
+    sandbox_dir = tmp_path / "sandbox"
+    sandbox_dir.mkdir()
+    store = ArtifactStore(tmp_path / "store")
+    (sandbox_dir / "first.txt").write_bytes(b"1234")
+    (sandbox_dir / "large.txt").write_bytes(b"12345")
+
+    with pytest.raises(ValidationError) as exc_info:
+        store.collect_outputs(
+            output_dir=sandbox_dir,
+            allowed=("first.txt", "large.txt"),
+            max_bytes=4,
+            max_aggregate_bytes=aggregate_limit,
+        )
+    assert exc_info.value.code == ErrorCode.ARTIFACT_LIMIT.value
+    assert "Aggregate" not in str(exc_info.value)
+
+
 def test_collect_outputs_with_sandbox_policy(tmp_path: Path) -> None:
     sandbox_dir = tmp_path / "sandbox"
     sandbox_dir.mkdir()

@@ -274,7 +274,7 @@ def collect_outputs(
         aggregate_limit = (
             max_aggregate_bytes
             if max_aggregate_bytes is not None
-            else (max_bytes if max_bytes is not None else 16 * 1024 * 1024)
+            else max(16 * 1024 * 1024, stream_limit)
         )
         file_limit = max_files if max_files is not None else 64
 

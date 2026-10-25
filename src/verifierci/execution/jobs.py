@@ -112,7 +112,13 @@ def _mark_attempt_stale(
             "bytes_written": attempt.resources.bytes_written,
         }
     )
-    artifact_digests_json = json.dumps(list(attempt.artifact_digests))
+    artifact_digests_json = json.dumps(
+        [
+            digest
+            for digest in attempt.artifact_digests
+            if _valid_artifact_digest(conn, digest) is not None
+        ]
+    )
     capture_truncated_int = 1 if attempt.capture_truncated else 0
 
     outcome = (
@@ -137,7 +143,7 @@ def _mark_attempt_stale(
             resources = ?,
             artifact_digests = ?,
             capture_truncated = ?
-        WHERE attempt_id = ? AND disposition IN ('active', 'abandoned')
+        WHERE attempt_id = ? AND job_id = ? AND disposition IN ('active', 'abandoned')
         """,
         (
             outcome,
@@ -154,6 +160,7 @@ def _mark_attempt_stale(
             artifact_digests_json,
             capture_truncated_int,
             attempt_id,
+            attempt.job_id,
         ),
     )
 
