@@ -67,6 +67,7 @@ def connect(path: Path | str = ":memory:") -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys = ON;")
     conn.execute("PRAGMA busy_timeout = 5000;")
     conn.execute("PRAGMA synchronous = FULL;")
+    conn.execute("PRAGMA recursive_triggers = ON;")
 
     if not is_memory:
         conn.execute("PRAGMA journal_mode = WAL;")
@@ -98,6 +99,7 @@ def transaction(
 
     timeout_ms = max(1, int(timeout * 1000))
     conn.execute(f"PRAGMA busy_timeout = {timeout_ms};")
+    conn.execute("PRAGMA recursive_triggers = ON;")
     try:
         while True:
             try:

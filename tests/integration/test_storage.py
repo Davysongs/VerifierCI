@@ -44,6 +44,8 @@ def test_disk_database_wal_mode_and_pragmas(tmp_path: Path) -> None:
         assert fk == 1
         assert sync == 2  # FULL
         assert busy == 5000
+        rec_triggers = conn.execute("PRAGMA recursive_triggers").fetchone()[0]
+        assert rec_triggers == 1
     finally:
         conn.close()
 
@@ -280,6 +282,27 @@ def test_immutability_triggers_abort_updates_and_deletes(tmp_path: Path) -> None
         sqlite3.IntegrityError, match="immutable entity patch_panels cannot be deleted"
     ):
         conn.execute("DELETE FROM patch_panels WHERE panel_key = 'sealed_panel@1.0'")
+
+    # 8. INSERT OR REPLACE triggers DELETE trigger and is rejected on protected tables
+    with pytest.raises(
+        sqlite3.IntegrityError, match="immutable entity patch_panels cannot be deleted"
+    ):
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO patch_panels (panel_key, panel_id, version, split, membership_digest, sampling_policy, sealed_at)
+            VALUES ('sealed_panel@1.0', 'p_seal', '1.0', 'development', 'mem_hacked', 'fixed', '2026-09-21T00:00:00Z')
+            """
+        )
+
+    with pytest.raises(
+        sqlite3.IntegrityError, match="immutable entity tasks cannot be deleted"
+    ):
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO tasks (task_key, task_id, version, statement, adapter, contract_hash, snapshot_digest, environment_id, licence, provenance, eligibility, notes, created_at)
+            VALUES ('task1@v1', 'task1', 'v1', 'statement_hacked', 'fixture', 'con1_hash', 'snap1_hash', 'env1', 'MIT', 'prov', 'eligible', '', '2026-09-21T00:00:00Z')
+            """
+        )
 
 
 def test_authoritative_evaluation_attempt_immutability(tmp_path: Path) -> None:

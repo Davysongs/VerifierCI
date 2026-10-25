@@ -940,6 +940,135 @@ def test_immutable_triggers_patch_panels() -> None:
             conn.execute(
                 "UPDATE patch_panels SET split = 'assessment' WHERE panel_key = 'p_unsealed'"
             )
+
+        # 5. INSERT OR REPLACE on existing panel triggers DELETE and is blocked
+        with pytest.raises(
+            sqlite3.DatabaseError,
+            match="immutable entity patch_panels cannot be deleted",
+        ):
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO patch_panels (
+                    panel_key, panel_id, version, split, membership_digest, sampling_policy, sealed_at
+                ) VALUES (
+                    'p_unsealed', 'panel1_replaced', 'v2', 'assessment', 'mdigest2', 'policy2', NULL
+                )
+                """
+            )
+    finally:
+        conn.close()
+
+
+def test_recursive_triggers_reject_insert_or_replace_on_protected_tables() -> None:
+    """Verify recursive triggers ensure REPLACE fires DELETE triggers on protected tables."""
+    conn = connect(":memory:")
+    try:
+        migrate(conn)
+        conn.execute(
+            """
+            INSERT INTO patch_panels (
+                panel_key, panel_id, version, split, membership_digest, sampling_policy, sealed_at
+            ) VALUES (
+                'p_unsealed', 'panel1', 'v1', 'development', 'mdigest1', 'policy1', NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO artifacts (digest, kind, size_bytes, storage_uri, media_type, access_policy, available, created_at)
+            VALUES ('art1', 'diff', 10, 'file:///diff', 'text/x-diff', 'sealed', 1, '2026-09-21T00:00:00Z')
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO worker_requests (request_id, operation, request_digest, response_json, completed_at)
+            VALUES ('wr1', 'heartbeat', 'd1', '{}', '2026-09-21T00:00:00Z')
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO split_reservations (reservation_key, assessment_panel_key, reserved_at)
+            VALUES ('res1', 'p_unsealed', '2026-09-21T00:00:00Z')
+            """
+        )
+
+        # 1. REPLACE INTO patch_panels is blocked by patch_panels_no_delete
+        with pytest.raises(
+            sqlite3.DatabaseError,
+            match="immutable entity patch_panels cannot be deleted",
+        ):
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO patch_panels (
+                    panel_key, panel_id, version, split, membership_digest, sampling_policy, sealed_at
+                ) VALUES (
+                    'p_unsealed', 'panel1_hacked', 'v2', 'assessment', 'mdigest2', 'policy2', NULL
+                )
+                """
+            )
+
+        # 2. REPLACE INTO artifacts is blocked by artifacts_no_delete
+        with pytest.raises(
+            sqlite3.DatabaseError,
+            match="sealed artifacts cannot be deleted",
+        ):
+            conn.execute(
+                """
+                REPLACE INTO artifacts (digest, kind, size_bytes, storage_uri, media_type, access_policy, available, created_at)
+                VALUES ('art1', 'diff', 20, 'file:///diff2', 'text/x-diff', 'public', 1, '2026-09-21T00:00:00Z')
+                """
+            )
+
+        # 3. REPLACE INTO worker_requests is blocked by worker_requests_no_delete
+        with pytest.raises(
+            sqlite3.DatabaseError,
+            match="immutable entity worker_requests cannot be deleted",
+        ):
+            conn.execute(
+                """
+                REPLACE INTO worker_requests (request_id, operation, request_digest, response_json, completed_at)
+                VALUES ('wr1', 'cancelled', 'd2', '{}', '2026-09-21T00:00:00Z')
+                """
+            )
+
+        # 4. REPLACE INTO split_reservations is blocked by reserve_no_delete
+        with pytest.raises(
+            sqlite3.DatabaseError,
+            match="assessment reservation is permanent",
+        ):
+            conn.execute(
+                """
+                REPLACE INTO split_reservations (reservation_key, assessment_panel_key, reserved_at)
+                VALUES ('res1', 'p_unsealed', '2026-09-21T00:00:00Z')
+                """
+            )
+
+        # 5. Verify transaction() also enforces recursive triggers even on a raw connection
+        raw_conn = sqlite3.connect(":memory:", isolation_level=None)
+        try:
+            # Without connect(), raw_conn has recursive_triggers = OFF by default
+            migrate(raw_conn)
+            raw_conn.execute(
+                """
+                INSERT INTO artifacts (digest, kind, size_bytes, storage_uri, media_type, access_policy, available, created_at)
+                VALUES ('art_raw', 'diff', 10, 'file:///raw', 'text/x-diff', 'sealed', 1, '2026-09-21T00:00:00Z')
+                """
+            )
+            with (
+                transaction(raw_conn, immediate=True),
+                pytest.raises(
+                    sqlite3.DatabaseError,
+                    match="sealed artifacts cannot be deleted",
+                ),
+            ):
+                raw_conn.execute(
+                    """
+                    REPLACE INTO artifacts (digest, kind, size_bytes, storage_uri, media_type, access_policy, available, created_at)
+                    VALUES ('art_raw', 'diff', 20, 'file:///raw2', 'text/x-diff', 'public', 1, '2026-09-21T00:00:00Z')
+                    """
+                )
+        finally:
+            raw_conn.close()
     finally:
         conn.close()
 
