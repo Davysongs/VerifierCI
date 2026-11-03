@@ -643,7 +643,9 @@ def test_complete_worker_or_attempt_mismatch_stale(db: Database) -> None:
 
 
 @pytest.mark.parametrize("reaped", [False, True])
-def test_complete_records_stale_quarantined_evidence(db: Database, reaped: bool) -> None:
+def test_complete_records_stale_quarantined_evidence(
+    db: Database, reaped: bool
+) -> None:
     conn = db.connection
     now_ms = 1_000_000
     job = claim(conn, worker_id="w1", now_ms=now_ms)

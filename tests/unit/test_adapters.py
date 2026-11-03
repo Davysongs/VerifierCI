@@ -367,3 +367,236 @@ def test_import_task_unsupported_backend() -> None:
         with pytest.raises(ValidationError) as exc:
             adapter.import_task(req)
         assert "custom_backend" in str(exc.value)
+
+
+def test_manifest_absolute_path_rejected() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        td = Path(tmpdir)
+        bad_file = td / "task.yaml"
+        bad_file.write_text(
+            """schema_version: '1.0.0'
+task_id: test
+version: 1.0.0
+statement: statement
+licence: MIT
+provenance: local
+eligibility: eligible
+contract: /etc/passwd
+snapshot: source/
+environment: environment.yaml
+verifier: v1.yaml
+"""
+        )
+        with pytest.raises(ProtectionError) as exc:
+            read_local_manifest(bad_file)
+        assert exc.value.code == ErrorCode.PROTECTION_ERROR.value
+        assert "Absolute paths are prohibited" in str(exc.value)
+
+
+def test_manifest_intermediate_symlink_rejected() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        td = Path(tmpdir)
+        real_sub = td / "real_sub"
+        real_sub.mkdir()
+        (real_sub / "c.yaml").write_text("requirements: []\n")
+
+        sym_sub = td / "sym_sub"
+        sym_sub.symlink_to(real_sub)
+
+        bad_file = td / "task.yaml"
+        bad_file.write_text(
+            """schema_version: '1.0.0'
+task_id: test
+version: 1.0.0
+statement: statement
+licence: MIT
+provenance: local
+eligibility: eligible
+contract: sym_sub/c.yaml
+snapshot: source/
+environment: environment.yaml
+verifier: v1.yaml
+"""
+        )
+        with pytest.raises(ProtectionError) as exc:
+            read_local_manifest(bad_file)
+        assert exc.value.code == ErrorCode.PROTECTION_ERROR.value
+        assert "Symlinks are prohibited" in str(exc.value)
+
+
+def test_import_task_symlink_manifest_rejected() -> None:
+    adapter = LocalAdapter()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        td = Path(tmpdir)
+        real_manifest = td / "real_task.yaml"
+        real_manifest.write_text(
+            "schema_version: '1.0.0'\ntask_id: t1\nstatement: s\ncontract: c.yaml\nsnapshot: s/\nverifier: v.yaml\n"
+        )
+        link_manifest = td / "link_task.yaml"
+        link_manifest.symlink_to(real_manifest)
+
+        req = ImportRequest(
+            adapter="local",
+            instance="t1",
+            source=str(link_manifest),
+            source_revision="v1",
+            environment_manifest=None,
+            output_dir=str(td / "out"),
+            dry_run=True,
+        )
+        with pytest.raises(ProtectionError) as exc:
+            adapter.import_task(req)
+        assert exc.value.code == ErrorCode.PROTECTION_ERROR.value
+
+
+def test_import_task_snapshot_symlink_rejected() -> None:
+    adapter = LocalAdapter()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        td = Path(tmpdir)
+        snap = td / "source"
+        snap.mkdir()
+        outside_file = td / "outside.txt"
+        outside_file.write_text("sensitive data\n")
+        (snap / "link.txt").symlink_to(outside_file)
+
+        (td / "contract.yaml").write_text("requirements: []\n")
+        (td / "environment.yaml").write_text("backend: fixture\n")
+        (td / "v1.yaml").write_text("command: [pytest]\n")
+        task_f = td / "task.yaml"
+        task_f.write_text(
+            "schema_version: '1.0.0'\n"
+            "task_id: t_snap\n"
+            "version: '1.0.0'\n"
+            "statement: s\n"
+            "licence: MIT\n"
+            "provenance: local\n"
+            "contract: contract.yaml\n"
+            "snapshot: source/\n"
+            "verifier: v1.yaml\n"
+        )
+
+        req = ImportRequest(
+            adapter="local",
+            instance="t_snap",
+            source=str(task_f),
+            source_revision="v1",
+            environment_manifest=None,
+            output_dir=str(td / "out"),
+            dry_run=True,
+        )
+        with pytest.raises(ProtectionError) as exc:
+            adapter.import_task(req)
+        assert exc.value.code == ErrorCode.PROTECTION_ERROR.value
+        assert "Symlinks are prohibited in snapshot files" in str(exc.value)
+
+
+def test_import_task_missing_and_oversized_control_file() -> None:
+    adapter = LocalAdapter()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        td = Path(tmpdir)
+        (td / "source").mkdir()
+        (td / "contract.yaml").write_text("requirements: []\n")
+        (td / "environment.yaml").write_text("backend: fixture\n")
+        (td / "v1.yaml").write_text("command: [pytest]\n")
+        task_f = td / "task.yaml"
+        task_f.write_text(
+            "schema_version: '1.0.0'\n"
+            "task_id: t_ctrl\n"
+            "version: '1.0.0'\n"
+            "statement: s\n"
+            "contract: contract.yaml\n"
+            "snapshot: source/\n"
+            "verifier: v1.yaml\n"
+            "control_files:\n"
+            "  - missing.diff\n"
+        )
+
+        req = ImportRequest(
+            adapter="local",
+            instance="t_ctrl",
+            source=str(task_f),
+            source_revision="v1",
+            environment_manifest=None,
+            output_dir=str(td / "out"),
+            dry_run=True,
+        )
+        with pytest.raises(ValidationError) as exc:
+            adapter.import_task(req)
+        assert "Control file not found" in str(exc.value)
+
+        # Oversized control file (> 2 MiB)
+        (td / "big.diff").write_bytes(b"diff content\n" * 200_000)
+        task_f.write_text(
+            "schema_version: '1.0.0'\n"
+            "task_id: t_ctrl\n"
+            "version: '1.0.0'\n"
+            "statement: s\n"
+            "contract: contract.yaml\n"
+            "snapshot: source/\n"
+            "verifier: v1.yaml\n"
+            "control_files:\n"
+            "  - big.diff\n"
+        )
+        with pytest.raises(ValidationError) as exc2:
+            adapter.import_task(req)
+        assert exc2.value.code == ErrorCode.ARTIFACT_LIMIT.value
+
+
+def test_read_manifest_unsupported_schema_version() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        td = Path(tmpdir)
+        task_f = td / "task.yaml"
+        task_f.write_text(
+            "schema_version: '9.9.9'\ntask_id: t1\nstatement: s\ncontract: c.yaml\nsnapshot: s/\nverifier: v.yaml\n"
+        )
+        with pytest.raises(ValidationError) as exc:
+            read_local_manifest(task_f)
+        assert "Unsupported local manifest schema version" in str(exc.value)
+
+
+def test_import_task_modular_requirement_files() -> None:
+    adapter = LocalAdapter()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        td = Path(tmpdir)
+        (td / "source").mkdir()
+        reqs_dir = td / "requirements"
+        reqs_dir.mkdir()
+        (reqs_dir / "r1.yaml").write_text(
+            "requirement_id: REQ-1\ntext: Must succeed\nsource_kind: explicit\n"
+        )
+        (reqs_dir / "r2.yaml").write_text(
+            "requirement_id: REQ-2\ntext: Must be fast\nsource_kind: explicit\n"
+        )
+        (td / "contract.yaml").write_text(
+            "requirements:\n"
+            "  - requirement_id: REQ-0\n    text: Base req\n"
+            "requirement_files:\n"
+            "  - requirements/r1.yaml\n"
+            "  - requirements/r2.yaml\n"
+        )
+        (td / "environment.yaml").write_text("backend: fixture\n")
+        (td / "v1.yaml").write_text("command: [pytest]\n")
+        task_f = td / "task.yaml"
+        task_f.write_text(
+            "schema_version: '1.0.0'\n"
+            "task_id: t_reqs\n"
+            "version: '1.0.0'\n"
+            "statement: s\n"
+            "contract: contract.yaml\n"
+            "snapshot: source/\n"
+            "verifier: v1.yaml\n"
+        )
+
+        req = ImportRequest(
+            adapter="local",
+            instance="t_reqs",
+            source=str(task_f),
+            source_revision="v1",
+            environment_manifest=None,
+            output_dir=str(td / "out"),
+            dry_run=True,
+        )
+        bundle = adapter.import_task(req)
+        assert len(bundle.requirements) == 3
+        req_ids = [r.requirement_id for r in bundle.requirements]
+        assert req_ids == ["REQ-0", "REQ-1", "REQ-2"]
