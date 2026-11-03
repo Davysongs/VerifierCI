@@ -107,6 +107,16 @@ def _safe_load_yaml(path: Path) -> dict[str, Any]:
 
 def _resolve_relative_path(root_dir: Path, rel_path_str: str) -> Path:
     """Resolve a relative path, rejecting symlinks and directory traversal."""
+    if not rel_path_str:
+        raise ProtectionError(
+            "Empty relative path is prohibited in task imports.",
+            code=ErrorCode.PROTECTION_ERROR.value,
+        )
+    if Path(rel_path_str).is_absolute() or rel_path_str.startswith(("/", "\\")):
+        raise ProtectionError(
+            f"Absolute paths are prohibited in task imports: {rel_path_str}",
+            code=ErrorCode.PROTECTION_ERROR.value,
+        )
     norm_parts = rel_path_str.replace("\\", "/").split("/")
     if ".." in norm_parts:
         raise ProtectionError(
@@ -119,9 +129,17 @@ def _resolve_relative_path(root_dir: Path, rel_path_str: str) -> Path:
             f"Symlinks are prohibited in task imports: {rel_path_str}",
             code=ErrorCode.PROTECTION_ERROR.value,
         )
+    cur = p
+    resolved_root = root_dir.resolve()
+    while cur != root_dir and cur != resolved_root and cur != cur.parent:
+        if cur.is_symlink() or os.path.islink(cur):
+            raise ProtectionError(
+                f"Symlinks are prohibited in task imports: {rel_path_str}",
+                code=ErrorCode.PROTECTION_ERROR.value,
+            )
+        cur = cur.parent
     try:
         resolved = p.resolve()
-        resolved_root = root_dir.resolve()
         if not resolved.is_relative_to(resolved_root):
             raise ProtectionError(
                 f"Directory traversal detected in path: {rel_path_str}",
@@ -143,6 +161,11 @@ def read_local_manifest(
     Loads the task and resolves referenced contract, snapshot, environment,
     verifier, requirement, and control files.
     """
+    if path.is_symlink() or os.path.islink(path):
+        raise ProtectionError(
+            f"Symlink rejected in local manifest loading: {path}",
+            code=ErrorCode.PROTECTION_ERROR.value,
+        )
     data = manifest_data if manifest_data is not None else _safe_load_yaml(path)
     root_dir = path.parent
 
@@ -153,6 +176,11 @@ def read_local_manifest(
         )
 
     schema_version = str(data.get("schema_version", data.get("version", "1.0.0")))
+    if schema_version not in SUPPORTED_LOCAL_VERSIONS:
+        raise ValidationError(
+            f"Unsupported local manifest schema version: '{schema_version}'. Supported versions: {sorted(SUPPORTED_LOCAL_VERSIONS)}",
+            code=ErrorCode.VALIDATION_ERROR.value,
+        )
     task_data = data.get("task", {})
     if isinstance(task_data, dict) and task_data:
         task_id = str(task_data.get("task_id", data.get("task_id", path.stem)))
@@ -175,24 +203,42 @@ def read_local_manifest(
         eligibility = "eligible"
     adapter = str(data.get("adapter", "local"))
 
-    contract_file = str(
-        data.get("contract_file", data.get("contract", "contract.yaml"))
+    raw_contract = data.get("contract_file", data.get("contract", "contract.yaml"))
+    contract_file = (
+        str(raw_contract) if isinstance(raw_contract, str) else "contract.yaml"
     )
     _resolve_relative_path(root_dir, contract_file)
-    snapshot_file = str(data.get("snapshot_file", data.get("snapshot", "source/")))
+
+    raw_snapshot = data.get("snapshot_file", data.get("snapshot", "source/"))
+    snapshot_file = str(raw_snapshot) if isinstance(raw_snapshot, str) else "source/"
     _resolve_relative_path(root_dir, snapshot_file)
+
     env_data = data.get("environment_file", data.get("environment", {}))
     environment_file = (
         str(env_data) if isinstance(env_data, str) else "environment.yaml"
     )
     _resolve_relative_path(root_dir, environment_file)
+
     req_files = data.get("requirement_files", ())
+    if not isinstance(req_files, (list, tuple)):
+        raise ValidationError(
+            "requirement_files must be a list or tuple of file paths",
+            code=ErrorCode.VALIDATION_ERROR.value,
+        )
     requirement_files = tuple(str(x) for x in req_files)
     for rf in requirement_files:
         _resolve_relative_path(root_dir, rf)
-    verifier_file = str(data.get("verifier_file", data.get("verifier", "v1.yaml")))
+
+    raw_verifier = data.get("verifier_file", data.get("verifier", "v1.yaml"))
+    verifier_file = str(raw_verifier) if isinstance(raw_verifier, str) else "v1.yaml"
     _resolve_relative_path(root_dir, verifier_file)
+
     ctrl_files = data.get("control_files", ())
+    if not isinstance(ctrl_files, (list, tuple)):
+        raise ValidationError(
+            "control_files must be a list or tuple of file paths",
+            code=ErrorCode.VALIDATION_ERROR.value,
+        )
     control_files = tuple(str(x) for x in ctrl_files)
     for cf in control_files:
         _resolve_relative_path(root_dir, cf)
@@ -256,6 +302,11 @@ class LocalAdapter(TaskAdapter):
     def import_task(self, request: ImportRequest) -> ImportBundle:
         """Import a native task from its local manifest path."""
         manifest_path = Path(request.source)
+        if manifest_path.is_symlink() or os.path.islink(manifest_path):
+            raise ProtectionError(
+                f"Symlink rejected in local manifest loading: {manifest_path}",
+                code=ErrorCode.PROTECTION_ERROR.value,
+            )
         if not manifest_path.is_file():
             raise ValidationError(
                 f"Local task manifest not found: {request.source}",
@@ -264,7 +315,7 @@ class LocalAdapter(TaskAdapter):
         if manifest_path.stat().st_size > MAX_MANIFEST_BYTES:
             raise ValidationError(
                 f"File exceeds maximum allowed size of {MAX_MANIFEST_BYTES} bytes",
-                code=ErrorCode.VALIDATION_ERROR.value,
+                code=ErrorCode.ARTIFACT_LIMIT.value,
             )
 
         raw_bytes = manifest_path.read_bytes()
@@ -300,6 +351,33 @@ class LocalAdapter(TaskAdapter):
                 "contract 'requirements' must be a list",
                 code=ErrorCode.VALIDATION_ERROR.value,
             )
+        raw_reqs = list(raw_reqs)
+
+        req_files_to_load: list[str] = list(local_manifest.requirement_files)
+        if "requirement_files" in contract_data:
+            c_rf = contract_data.get("requirement_files")
+            if not isinstance(c_rf, (list, tuple)):
+                raise ValidationError(
+                    "contract 'requirement_files' must be a list",
+                    code=ErrorCode.VALIDATION_ERROR.value,
+                )
+            for rf in c_rf:
+                rf_str = str(rf)
+                if rf_str not in req_files_to_load:
+                    req_files_to_load.append(rf_str)
+
+        for rf_str in req_files_to_load:
+            rf_path = _resolve_relative_path(root_dir, rf_str)
+            rf_data = _safe_load_yaml(rf_path)
+            if isinstance(rf_data, list):
+                raw_reqs.extend(rf_data)
+            elif isinstance(rf_data, Mapping):
+                raw_reqs.append(rf_data)
+            else:
+                raise ValidationError(
+                    f"Requirement file {rf_str} must contain a mapping or list of mappings",
+                    code=ErrorCode.VALIDATION_ERROR.value,
+                )
         requirements_list: list[Requirement] = []
         for r in raw_reqs:
             if not isinstance(r, Mapping):
@@ -400,7 +478,7 @@ class LocalAdapter(TaskAdapter):
         )
 
         # 3. Snapshot
-        snapshot_dir = root_dir / local_manifest.snapshot_file
+        snapshot_dir = _resolve_relative_path(root_dir, local_manifest.snapshot_file)
         if not snapshot_dir.is_dir():
             raise ValidationError(
                 f"Snapshot directory not found or not a directory: {snapshot_dir}",
@@ -410,7 +488,12 @@ class LocalAdapter(TaskAdapter):
         # Hash directory content canonically with relative POSIX paths
         hasher = hashlib.sha256()
         for child in sorted(snapshot_dir.rglob("*")):
-            if child.is_file() and not child.is_symlink():
+            if child.is_symlink() or os.path.islink(child):
+                raise ProtectionError(
+                    f"Symlinks are prohibited in snapshot files: {child.relative_to(snapshot_dir)}",
+                    code=ErrorCode.PROTECTION_ERROR.value,
+                )
+            if child.is_file():
                 rel_posix = child.relative_to(snapshot_dir).as_posix()
                 hasher.update((rel_posix + "\0").encode("utf-8"))
                 hasher.update(child.read_bytes())
@@ -518,25 +601,34 @@ class LocalAdapter(TaskAdapter):
         controls_list: list[PatchCase] = []
         for ctrl_path_str in local_manifest.control_files:
             cp = _resolve_relative_path(root_dir, ctrl_path_str)
-            if cp.is_file():
-                diff_bytes = cp.read_bytes()
-                diff_digest = hashlib.sha256(diff_bytes).hexdigest()
-                case_id = f"{task.task_id}-ctrl-{cp.stem}"
-                case = PatchCase(
-                    case_id=case_id,
-                    task_key=task.task_key,
-                    diff_digest=diff_digest,
-                    base_snapshot_digest=snapshot_digest,
-                    source="reference",
-                    source_run_id=None,
-                    parent_case_ids=(),
-                    family_id="reference-family",
-                    role="reference",
-                    provenance_digest=hashlib.sha256(str(cp).encode()).hexdigest(),
-                    licence=task.licence,
-                    created_at=datetime.now(UTC),
+            if not cp.is_file():
+                raise ValidationError(
+                    f"Control file not found: {ctrl_path_str}",
+                    code=ErrorCode.VALIDATION_ERROR.value,
                 )
-                controls_list.append(case)
+            if cp.stat().st_size > MAX_MANIFEST_BYTES:
+                raise ValidationError(
+                    f"Control file exceeds size limit of {MAX_MANIFEST_BYTES} bytes: {ctrl_path_str}",
+                    code=ErrorCode.ARTIFACT_LIMIT.value,
+                )
+            diff_bytes = cp.read_bytes()
+            diff_digest = hashlib.sha256(diff_bytes).hexdigest()
+            case_id = f"{task.task_id}-ctrl-{cp.stem}"
+            case = PatchCase(
+                case_id=case_id,
+                task_key=task.task_key,
+                diff_digest=diff_digest,
+                base_snapshot_digest=snapshot_digest,
+                source="reference",
+                source_run_id=None,
+                parent_case_ids=(),
+                family_id="reference-family",
+                role="reference",
+                provenance_digest=hashlib.sha256(str(cp).encode()).hexdigest(),
+                licence=task.licence,
+                created_at=datetime.now(UTC),
+            )
+            controls_list.append(case)
 
         bundle = ImportBundle(
             task=task,
