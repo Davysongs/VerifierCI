@@ -11,6 +11,8 @@
 - Isolated attempt workspace preparation and subprocess supervisor (`execution/sandbox.py`), single-attempt lease-fenced `Worker` (`execution/worker.py`), normative classification precedence (`execution/outcomes.py`), and `PytestReportParser` (`evaluators/pytest_report.py`).
 - Phase 1 acceptance matrix reducer (`execution/matrix.py`) with fence-selected authoritative attempts, SDD §8.4 repetition aggregation, and refusal of matrix finalization when planned jobs remain pending.
 - Atomic static JSON report renderer (`reports/render.py`) serializing `AuditResult` envelopes with credential-sanitized artifact URIs (`fsync` + atomic rename) and matching JSON schema (`schemas/audit-result.schema.json`).
+- Panel validation registry (`panels/registry.py`) supporting schema, split, lineage, review-status, and artifact verification.
+- Click CLI entrypoint (`cli.py`) and orchestration service (`execution/service.py`) providing `--db`, `--artifact-dir`, `--config`, `--json`, `task import`, `panel validate`, `audit` group, and strict 0/1/2/3 exit code mapping.
 
 ## 0.1.0 - 2026-09-09
 

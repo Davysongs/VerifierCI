@@ -2,7 +2,7 @@
 
 VerifierCI is a production-oriented foundation for auditing coding-agent verifiers through versioned contracts, reproducible execution, and two-sided acceptance matrices.
 
-At the current stage (**Phase 1: Minimal Vertical Slice — in progress through PR 1.4 Unit 2**), the repository implements the core domain model, immutable SQLite storage and content-addressed artifact engine, fenced job queue, local task adapter, deterministic planner, isolated fixture worker, outcome parser, Phase 1 acceptance matrix reducer, and static atomic JSON reporter.
+At the current stage (**Phase 1: Minimal Vertical Slice — in progress through PR 1.4 Unit 3**), the repository implements the core domain model, immutable SQLite storage and content-addressed artifact engine, fenced job queue, local task adapter, deterministic planner, isolated fixture worker, outcome parser, Phase 1 acceptance matrix reducer, static atomic JSON reporter, and Click CLI commands (`task import`, `panel validate`, `audit`).
 
 ## Current Architecture
 
@@ -20,7 +20,8 @@ At the current stage (**Phase 1: Minimal Vertical Slice — in progress through 
 - `src/verifierci/evaluators/`: `PytestReportParser` (`pytest_report.py`) and compatibility evaluator stubs (`compatibility.py`).
 - `src/verifierci/metrics/rates.py`: Basic IAR/VRR helper functions (full Phase 2 challenge-panel scoring and Phase 8 uncertainty intervals upcoming).
 - `src/verifierci/reports/render.py`: Atomic static JSON reporter (`render_json`, `render_summary`, `ReportRenderer`) serializing `AuditResult` envelopes with credential-sanitized artifact URIs (`fsync` + atomic rename); HTML rendering arrives in Phase 3.
-- `src/verifierci/cli.py`: Minimal scaffold stub (Click CLI subcommands and end-to-end vertical slice wiring are the remaining units in PR 1.4).
+- `src/verifierci/cli.py`: Click CLI entry point (`verifierci`) supporting global options (`--db`, `--artifact-dir`, `--config`, `--json`, `--version`, `--help`), `task import`, `panel validate`, `audit` group, and canonical `0`/`1`/`2`/`3` exit category mapping.
+- `src/verifierci/execution/service.py`: Phase 1 orchestration connecting `LocalAdapter`, `PanelRegistry`, `planner`, SQLite persistence, `Worker`, `matrix`, and `reports.render`.
 - `schemas/` & `examples/retry-contract/`: Versioned JSON schemas and the synthetic 5-case, 2-verifier `retry-contract` fixture (SDD §1.3).
 
 ## Local setup
@@ -47,6 +48,6 @@ At the current stage (**Phase 1: Minimal Vertical Slice — in progress through 
 - ✅ **PR 1.1:** Core domain models, canonical JSON hashing, typed error codes, and initial registry scaffolds
 - ✅ **PR 1.2:** SQLite storage engine, immutability triggers, content-addressed `ArtifactStore`, and fenced job queue
 - ✅ **PR 1.3:** `LocalAdapter`, deterministic audit planner, isolated sandbox supervisor, outcome/pytest-report parsers, and single-attempt `Worker`
-- ✅ **PR 1.4 (Units 1–2):** Phase 1 acceptance matrix reducer (`verifierci.execution.matrix`) and atomic static JSON reporter (`verifierci.reports.render`)
-- 🟡 **PR 1.4 (Remaining):** Click CLI surface (`cli.py`) and end-to-end `examples/retry-contract` 30-job vertical slice verification
+- ✅ **PR 1.4 (Units 1–3):** Phase 1 acceptance matrix reducer (`verifierci.execution.matrix`), atomic static JSON reporter (`verifierci.reports.render`), and Click CLI (`verifierci.cli` with `task import`, `panel validate`, `audit`)
+- 🟡 **PR 1.4 (Remaining):** End-to-end `examples/retry-contract` 30-job vertical slice fixture & verification
 - ⏳ **Phases 2–8:** Full scoring/metrics & property tests (Phase 2), CI gate & HTML reporter (Phase 3), Docker sandbox (Phase 4), external adapters & panel/statistical workflows (Phases 5–8)

@@ -311,6 +311,105 @@ def read_local_manifest(
     )
 
 
+def load_local_verifier(
+    verifier_path: Path,
+    *,
+    default_verifier_id: str | None = None,
+    compatible_contract_hashes: tuple[str, ...] = (),
+) -> tuple[VerifierVersion, VerifierManifest]:
+    """Load and validate a local verifier YAML file into typed VerifierVersion and VerifierManifest."""
+    if verifier_path.is_symlink() or os.path.islink(verifier_path):
+        raise ProtectionError(
+            f"Symlink rejected in verifier loading: {verifier_path}",
+            code=ErrorCode.PROTECTION_ERROR.value,
+        )
+    if not verifier_path.is_file():
+        raise ValidationError(
+            f"Verifier file not found: {verifier_path}",
+            code=ErrorCode.VALIDATION_ERROR.value,
+        )
+
+    verifier_data = _safe_load_yaml(verifier_path)
+    raw_manifest = verifier_data.get("manifest")
+    manifest_src: Mapping[str, Any] = (
+        raw_manifest if isinstance(raw_manifest, Mapping) else verifier_data
+    )
+
+    raw_cmd = manifest_src.get("command", ["pytest", "tests/"])
+    if not isinstance(raw_cmd, (list, tuple)) or not raw_cmd:
+        raise ValidationError(
+            f"Verifier '{verifier_path}' command must be a non-empty list.",
+            code=ErrorCode.VALIDATION_ERROR.value,
+        )
+    v_cmd = tuple(str(x) for x in raw_cmd)
+    v_bcmd = tuple(str(x) for x in manifest_src.get("build_command", []))
+    v_exp = tuple(str(x) for x in manifest_src.get("expected_collection", []))
+    v_req = tuple(str(x) for x in manifest_src.get("required_pass_ids", []))
+    v_skips = tuple(str(x) for x in manifest_src.get("permitted_skips", []))
+    v_edits = tuple(str(x) for x in manifest_src.get("allowed_edit_paths", ["src/"]))
+    v_timeout = int(manifest_src.get("timeout_seconds", 60))
+    if v_timeout <= 0:
+        raise ValidationError(
+            f"Verifier '{verifier_path}' timeout_seconds must be > 0, got {v_timeout}.",
+            code=ErrorCode.VALIDATION_ERROR.value,
+        )
+    v_parser = str(manifest_src.get("parser_id", "pytest-report-v1"))
+    v_report_path = str(manifest_src.get("report_path", "report.json"))
+    v_mode = manifest_src.get("mode", "compatibility")
+    if v_mode not in ("compatibility", "blackbox"):
+        raise ValidationError(
+            f"Unsupported verifier mode '{v_mode}' in {verifier_path}.",
+            code=ErrorCode.VALIDATION_ERROR.value,
+        )
+
+    payload_digest = hashlib.sha256(verifier_path.read_bytes()).hexdigest()
+    v_man_obj = VerifierManifest(
+        manifest_hash="temp",
+        mode=v_mode,
+        command=v_cmd,
+        build_command=v_bcmd,
+        expected_collection=v_exp,
+        parser_id=v_parser,
+        report_path=v_report_path,
+        payload_digest=payload_digest,
+        allowed_edit_paths=v_edits,
+        required_pass_ids=v_req,
+        permitted_skips=v_skips,
+        timeout_seconds=v_timeout,
+    )
+    mhash = manifest_hash(v_man_obj)
+    verifier_manifest = VerifierManifest(
+        manifest_hash=mhash,
+        mode=v_mode,
+        command=v_cmd,
+        build_command=v_bcmd,
+        expected_collection=v_exp,
+        parser_id=v_parser,
+        report_path=v_report_path,
+        payload_digest=payload_digest,
+        allowed_edit_paths=v_edits,
+        required_pass_ids=v_req,
+        permitted_skips=v_skips,
+        timeout_seconds=v_timeout,
+    )
+
+    fallback_id = default_verifier_id or verifier_path.stem
+    verifier_id = str(verifier_data.get("verifier_id", fallback_id))
+    verifier_ver = str(verifier_data.get("version", "1.0.0"))
+    verifier_key = f"{verifier_id}@{verifier_ver}"
+    verifier = VerifierVersion(
+        verifier_key=verifier_key,
+        verifier_id=verifier_id,
+        version=verifier_ver,
+        parent_key=verifier_data.get("parent_verifier"),
+        manifest_hash=mhash,
+        payload_digest=payload_digest,
+        compatible_contract_hashes=compatible_contract_hashes,
+        created_at=datetime.now(UTC),
+    )
+    return verifier, verifier_manifest
+
+
 class LocalAdapter(TaskAdapter):
     """Adapter for importing native local tasks and fixtures."""
 
@@ -572,70 +671,10 @@ class LocalAdapter(TaskAdapter):
 
         # 4. Verifier Manifest & Version
         verifier_path = _resolve_relative_path(root_dir, local_manifest.verifier_file)
-        verifier_data = _safe_load_yaml(verifier_path)
-
-        v_cmd = tuple(
-            str(x) for x in verifier_data.get("command", ["pytest", "tests/"])
-        )
-        v_bcmd = tuple(str(x) for x in verifier_data.get("build_command", []))
-        v_exp = tuple(str(x) for x in verifier_data.get("expected_collection", []))
-        v_req = tuple(str(x) for x in verifier_data.get("required_pass_ids", []))
-        v_skips = tuple(str(x) for x in verifier_data.get("permitted_skips", []))
-        v_edits = tuple(
-            str(x) for x in verifier_data.get("allowed_edit_paths", ["src/"])
-        )
-        v_timeout = int(verifier_data.get("timeout_seconds", 60))
-        v_parser = str(verifier_data.get("parser_id", "pytest-report-v1"))
-        v_report_path = str(verifier_data.get("report_path", "report.json"))
-        v_mode = verifier_data.get("mode", "compatibility")
-        if v_mode not in ("compatibility", "blackbox"):
-            v_mode = "compatibility"
-
-        payload_digest = hashlib.sha256(verifier_path.read_bytes()).hexdigest()
-        v_man_obj = VerifierManifest(
-            manifest_hash="temp",
-            mode=v_mode,
-            command=v_cmd,
-            build_command=v_bcmd,
-            expected_collection=v_exp,
-            parser_id=v_parser,
-            report_path=v_report_path,
-            payload_digest=payload_digest,
-            allowed_edit_paths=v_edits,
-            required_pass_ids=v_req,
-            permitted_skips=v_skips,
-            timeout_seconds=v_timeout,
-        )
-        mhash = manifest_hash(v_man_obj)
-        verifier_manifest = VerifierManifest(
-            manifest_hash=mhash,
-            mode=v_mode,
-            command=v_cmd,
-            build_command=v_bcmd,
-            expected_collection=v_exp,
-            parser_id=v_parser,
-            report_path=v_report_path,
-            payload_digest=payload_digest,
-            allowed_edit_paths=v_edits,
-            required_pass_ids=v_req,
-            permitted_skips=v_skips,
-            timeout_seconds=v_timeout,
-        )
-
-        verifier_id = str(
-            verifier_data.get("verifier_id", f"{local_manifest.task.task_id}-v1")
-        )
-        verifier_ver = str(verifier_data.get("version", "1.0.0"))
-        verifier_key = f"{verifier_id}@{verifier_ver}"
-        verifier = VerifierVersion(
-            verifier_key=verifier_key,
-            verifier_id=verifier_id,
-            version=verifier_ver,
-            parent_key=None,
-            manifest_hash=mhash,
-            payload_digest=payload_digest,
+        verifier, verifier_manifest = load_local_verifier(
+            verifier_path,
+            default_verifier_id=f"{local_manifest.task.task_id}-v1",
             compatible_contract_hashes=(chash,),
-            created_at=datetime.now(UTC),
         )
 
         # 5. Build Final Task Record
