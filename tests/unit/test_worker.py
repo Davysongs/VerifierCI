@@ -16,10 +16,12 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
-from verifierci.errors import ErrorCode
+from verifierci.errors import ErrorCode, LeaseLost, ValidationError
+from verifierci.execution.outcomes import ParsedOutcome
 from verifierci.execution.worker import Worker
 from verifierci.models.verifier import VerifierManifest
 from verifierci.storage.artifacts import ArtifactStore
@@ -747,3 +749,299 @@ def test_worker_run_one_manifest_resolve_failure(
     ).fetchone()
     assert att["outcome"] == "invalid_evaluation"
     assert att["evaluation_validity"] == "invalid"
+
+
+def test_worker_lease_expired_during_execution_marked_stale(
+    setup_env: tuple[Database, Path, Path],
+) -> None:
+    db, snap_dir, root = setup_env
+    conn = db.connection
+
+    conn.execute(
+        """
+        INSERT INTO jobs (job_id, run_id, task_key, case_id, verifier_key, repetition, state, fence, attempts_started)
+        VALUES ('j_stale_exp', 'run1', 'task1@1.0', 'case1', 'verifier@1.0', 0, 'PENDING', 0, 0)
+        """
+    )
+
+    script = (
+        "import json, sys\n"
+        "from pathlib import Path\n"
+        "out = Path(sys.argv[1])\n"
+        "data = {'tests': [{'nodeid': 't1', 'outcome': 'passed'}]}\n"
+        "(out / 'report.json').write_text(json.dumps(data))\n"
+    )
+    py_script = root / "runner_stale.py"
+    py_script.write_text(script)
+
+    manifest = VerifierManifest(
+        manifest_hash="3" * 64,
+        mode="compatibility",
+        command=(sys.executable, str(py_script), "{out}"),
+        build_command=(),
+        expected_collection=("t1",),
+        parser_id="pytest-report-v1",
+        report_path="report.json",
+        payload_digest="c" * 64,
+        allowed_edit_paths=("*",),
+        required_pass_ids=("t1",),
+        permitted_skips=(),
+        timeout_seconds=30,
+    )
+
+    worker = Worker(
+        work_dir=root / "work_stale",
+        diff_resolver={"case1": b""},
+        manifest_resolver={"verifier@1.0": manifest},
+        snapshot_resolver={"task1@1.0": snap_dir},
+        lease_duration_ms=10_000,
+    )
+
+    # Claim at 10_000 ms (lease expires at 20_000 ms), complete at 30_000 ms (expired)
+    executed = worker.run_one(
+        conn, run_id="run1", now_ms=10_000, complete_now_ms=30_000
+    )
+    assert executed is True
+
+    # Job is NOT terminal DONE/FAILED and has NO selected_attempt_id
+    row = conn.execute(
+        "SELECT state, selected_attempt_id FROM jobs WHERE job_id = 'j_stale_exp'"
+    ).fetchone()
+    assert row["state"] == "RUNNING"
+    assert row["selected_attempt_id"] is None
+
+    # Attempt is recorded with disposition 'stale', evaluation_validity 'invalid'
+    att = conn.execute(
+        "SELECT * FROM evaluation_attempts WHERE job_id = 'j_stale_exp'"
+    ).fetchone()
+    assert att["disposition"] == "stale"
+    assert att["evaluation_validity"] == "invalid"
+    assert att["outcome"] is None
+
+
+def test_worker_lease_lost_event_sets_stale(
+    setup_env: tuple[Database, Path, Path],
+) -> None:
+    db, snap_dir, root = setup_env
+    conn = db.connection
+
+    conn.execute(
+        """
+        INSERT INTO jobs (job_id, run_id, task_key, case_id, verifier_key, repetition, state, fence, attempts_started)
+        VALUES ('j_lease_lost', 'run1', 'task1@1.0', 'case1', 'verifier@1.0', 0, 'PENDING', 0, 0)
+        """
+    )
+
+    script = (
+        "import json, sys\n"
+        "from pathlib import Path\n"
+        "out = Path(sys.argv[1])\n"
+        "data = {'tests': [{'nodeid': 't1', 'outcome': 'passed'}]}\n"
+        "(out / 'report.json').write_text(json.dumps(data))\n"
+    )
+    py_script = root / "runner_lost.py"
+    py_script.write_text(script)
+
+    manifest = VerifierManifest(
+        manifest_hash="3" * 64,
+        mode="compatibility",
+        command=(sys.executable, str(py_script), "{out}"),
+        build_command=(),
+        expected_collection=("t1",),
+        parser_id="pytest-report-v1",
+        report_path="report.json",
+        payload_digest="c" * 64,
+        allowed_edit_paths=("*",),
+        required_pass_ids=("t1",),
+        permitted_skips=(),
+        timeout_seconds=30,
+    )
+
+    worker = Worker(
+        work_dir=root / "work_lost",
+        diff_resolver={"case1": b""},
+        manifest_resolver={"verifier@1.0": manifest},
+        snapshot_resolver={"task1@1.0": snap_dir},
+        heartbeat_interval_seconds=0.01,
+        lease_duration_ms=1000,
+    )
+
+    with patch(
+        "verifierci.execution.jobs.heartbeat", side_effect=LeaseLost("Lease lost")
+    ):
+        executed = worker.run_one(conn, run_id="run1")
+        assert executed is True
+
+    row = conn.execute(
+        "SELECT state, selected_attempt_id FROM jobs WHERE job_id = 'j_lease_lost'"
+    ).fetchone()
+    assert row["state"] == "RUNNING"
+    assert row["selected_attempt_id"] is None
+
+    att = conn.execute(
+        "SELECT * FROM evaluation_attempts WHERE job_id = 'j_lease_lost'"
+    ).fetchone()
+    assert att["disposition"] == "stale"
+
+
+def test_worker_cleanup_in_finally_on_error(
+    setup_env: tuple[Database, Path, Path],
+) -> None:
+    db, snap_dir, root = setup_env
+    conn = db.connection
+
+    conn.execute(
+        """
+        INSERT INTO jobs (job_id, run_id, task_key, case_id, verifier_key, repetition, state, fence, attempts_started)
+        VALUES ('j_cleanup_err', 'run1', 'task1@1.0', 'case1', 'verifier@1.0', 0, 'PENDING', 0, 0)
+        """
+    )
+
+    work_dir = root / "work_cleanup"
+    worker = Worker(
+        work_dir=work_dir,
+        diff_resolver={"case1": b""},
+        snapshot_resolver={"task1@1.0": snap_dir},
+    )
+
+    # Missing manifest will raise in resolution
+    executed = worker.run_one(conn, run_id="run1")
+    assert executed is True
+
+    # Verify attempt directory in attempts/ was cleaned up
+    attempts_dir = work_dir / "attempts"
+    if attempts_dir.exists():
+        assert len(list(attempts_dir.iterdir())) == 0
+
+
+def test_worker_resolve_diff_missing_case(
+    setup_env: tuple[Database, Path, Path],
+) -> None:
+    db, _snap_dir, root = setup_env
+    conn = db.connection
+    worker = Worker(work_dir=root / "work_missing_case")
+
+    with pytest.raises(ValidationError) as exc:
+        worker._resolve_diff("nonexistent_case", conn)
+    assert "Patch case 'nonexistent_case' not found" in str(exc.value)
+
+
+def test_worker_infrastructure_error_transitions_job_to_failed(
+    setup_env: tuple[Database, Path, Path],
+) -> None:
+    db, snap_dir, root = setup_env
+    conn = db.connection
+
+    conn.execute(
+        """
+        INSERT INTO jobs (job_id, run_id, task_key, case_id, verifier_key, repetition, state, fence, attempts_started)
+        VALUES ('j_infra_fail', 'run1', 'task1@1.0', 'case1', 'verifier@1.0', 0, 'PENDING', 0, 0)
+        """
+    )
+
+    script = "import sys\nsys.exit(137)\n"
+    py_script = root / "runner_infra.py"
+    py_script.write_text(script)
+
+    manifest = VerifierManifest(
+        manifest_hash="3" * 64,
+        mode="compatibility",
+        command=(sys.executable, str(py_script)),
+        build_command=(),
+        expected_collection=(),
+        parser_id="pytest-report-v1",
+        report_path="report.json",
+        payload_digest="c" * 64,
+        allowed_edit_paths=("*",),
+        required_pass_ids=(),
+        permitted_skips=(),
+        timeout_seconds=30,
+    )
+
+    worker = Worker(
+        work_dir=root / "work_infra",
+        diff_resolver={"case1": b""},
+        manifest_resolver={"verifier@1.0": manifest},
+        snapshot_resolver={"task1@1.0": snap_dir},
+    )
+
+    with patch(
+        "verifierci.execution.worker.parse_capture",
+        return_value=ParsedOutcome(
+            outcome="error",
+            evaluation_validity="invalid",
+            error_code=ErrorCode.INFRASTRUCTURE_ERROR.value,
+            report=None,
+            evidence_digests=(),
+        ),
+    ):
+        executed = worker.run_one(conn, run_id="run1")
+        assert executed is True
+
+    row = conn.execute(
+        "SELECT state, terminal_reason, selected_attempt_id FROM jobs WHERE job_id = 'j_infra_fail'"
+    ).fetchone()
+    assert row["state"] == "FAILED"
+    assert row["terminal_reason"] == ErrorCode.INFRASTRUCTURE_ERROR.value
+    assert row["selected_attempt_id"] is not None
+
+
+def test_worker_symlink_ignored_for_artifacts(
+    setup_env: tuple[Database, Path, Path],
+) -> None:
+    db, snap_dir, root = setup_env
+    conn = db.connection
+
+    conn.execute(
+        """
+        INSERT INTO jobs (job_id, run_id, task_key, case_id, verifier_key, repetition, state, fence, attempts_started)
+        VALUES ('j_symlink', 'run1', 'task1@1.0', 'case1', 'verifier@1.0', 0, 'PENDING', 0, 0)
+        """
+    )
+
+    secret_file = root / "secret.txt"
+    secret_file.write_text("SUPER_SECRET")
+
+    script = (
+        "import os, sys\n"
+        "from pathlib import Path\n"
+        "out = Path(sys.argv[1])\n"
+        "secret = Path(sys.argv[2])\n"
+        "os.symlink(secret, out / 'report.json')\n"
+    )
+    py_script = root / "runner_symlink.py"
+    py_script.write_text(script)
+
+    manifest = VerifierManifest(
+        manifest_hash="3" * 64,
+        mode="compatibility",
+        command=(sys.executable, str(py_script), "{out}", str(secret_file)),
+        build_command=(),
+        expected_collection=(),
+        parser_id="pytest-report-v1",
+        report_path="report.json",
+        payload_digest="c" * 64,
+        allowed_edit_paths=("*",),
+        required_pass_ids=(),
+        permitted_skips=(),
+        timeout_seconds=30,
+    )
+
+    worker = Worker(
+        work_dir=root / "work_symlink",
+        diff_resolver={"case1": b""},
+        manifest_resolver={"verifier@1.0": manifest},
+        snapshot_resolver={"task1@1.0": snap_dir},
+    )
+
+    executed = worker.run_one(conn, run_id="run1")
+    assert executed is True
+
+    row = conn.execute(
+        "SELECT state, selected_attempt_id FROM jobs WHERE job_id = 'j_symlink'"
+    ).fetchone()
+    att = conn.execute(
+        "SELECT report_digest, artifact_digests FROM evaluation_attempts WHERE attempt_id = ?",
+        (row["selected_attempt_id"],),
+    ).fetchone()
+    assert att["report_digest"] is None

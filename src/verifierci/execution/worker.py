@@ -40,7 +40,7 @@ from verifierci.execution import jobs
 from verifierci.execution.outcomes import ParsedOutcome, parse_capture
 from verifierci.execution.sandbox import cleanup_attempt, execute, prepare_workspace
 from verifierci.models.protocol import ExecutionCapture, ResourceUsage
-from verifierci.models.result import Artifact, EvaluationAttempt
+from verifierci.models.result import Artifact, EvaluationAttempt, validate_attempt
 from verifierci.models.verifier import VerifierManifest, resolve_command
 from verifierci.storage.artifacts import ArtifactStore
 
@@ -88,6 +88,7 @@ class Worker:
         ) = None,
         lease_duration_ms: int = DEFAULT_LEASE_MS,
         heartbeat_interval_seconds: float = 5.0,
+        clock: Callable[[], int] | None = None,
     ) -> None:
         self.worker_id = worker_id or str(uuid.uuid4())
         self.work_dir = (
@@ -104,6 +105,7 @@ class Worker:
         self.manifest_resolver = manifest_resolver
         self.lease_duration_ms = lease_duration_ms
         self.heartbeat_interval_seconds = heartbeat_interval_seconds
+        self.clock = clock or (lambda: int(time.time() * 1000))
 
     def _resolve_snapshot(self, task_key: str, conn: sqlite3.Connection) -> Path:
         p: Path
@@ -147,7 +149,12 @@ class Worker:
             "SELECT diff_digest FROM patch_cases WHERE case_id = ?",
             (case_id,),
         ).fetchone()
-        if row and row["diff_digest"]:
+        if row is None:
+            raise ValidationError(
+                f"Patch case '{case_id}' not found.",
+                code=ErrorCode.VALIDATION_ERROR.value,
+            )
+        if row["diff_digest"]:
             digest = str(row["diff_digest"])
             if self.artifact_store.exists(digest):
                 return self.artifact_store.read_bytes(digest)
@@ -224,12 +231,13 @@ class Worker:
         *,
         run_id: str | None = None,
         now_ms: int | None = None,
+        complete_now_ms: int | None = None,
     ) -> bool:
         """Claim, execute, and commit a single job from the queue.
 
         Returns True if a job was claimed and executed, False if the queue was empty.
         """
-        current_time_ms = now_ms if now_ms is not None else int(time.time() * 1000)
+        current_time_ms = now_ms if now_ms is not None else self.clock()
         job = jobs.claim(
             conn,
             worker_id=self.worker_id,
@@ -242,6 +250,8 @@ class Worker:
 
         attempt_id = job.attempt_id or str(uuid.uuid4())
         current_job = job
+        attempt_started_at = datetime.now(UTC)
+        attempt_finished_at: datetime | None = None
 
         conn_lock = threading.Lock()
         stop_heartbeat = threading.Event()
@@ -252,7 +262,7 @@ class Worker:
             nonlocal current_job
             while not stop_heartbeat.wait(self.heartbeat_interval_seconds):
                 try:
-                    hb_time = int(time.time() * 1000)
+                    hb_time = self.clock()
                     with conn_lock:
                         current_job = jobs.heartbeat(
                             conn,
@@ -270,9 +280,7 @@ class Worker:
         try:
             # 1. Transition job to RUNNING
             with conn_lock:
-                current_job = jobs.mark_running(
-                    conn, current_job, int(time.time() * 1000)
-                )
+                current_job = jobs.mark_running(conn, current_job, current_time_ms)
 
             # 3. Prepare workspace
             workspace_ready = False
@@ -354,76 +362,182 @@ class Worker:
 
             # 4. If workspace was prepared, execute build and verification
             if workspace_ready and manifest is not None:
-                paths = {
-                    "workspace": str(source_dir),
-                    "verifier": str(source_dir),
-                    "out": str(out_dir),
-                    "seed": "0",
-                }
-
-                build_exit_code = None
-                if manifest.build_command:
-                    build_spec = resolve_command(
-                        manifest.build_command,
-                        paths,
-                        cwd=str(source_dir),
-                        timeout_seconds=manifest.timeout_seconds,
-                    )
-                    b_capture = execute(
-                        job=current_job,
-                        command=build_spec.argv,
-                        workspace=source_dir,
-                        out_dir=out_dir,
-                        timeout_seconds=manifest.timeout_seconds,
-                        env=dict(build_spec.env),
-                    )
-                    build_exit_code = b_capture.exit_code
-
-                if build_exit_code is not None and build_exit_code != 0:
+                if lease_lost.is_set():
                     capture = ExecutionCapture(
                         attempt_id=attempt_id,
-                        exit_code=build_exit_code,
+                        exit_code=1,
                         timed_out=False,
                         oom_killed=False,
-                        cancelled=False,
-                        build_exit_code=build_exit_code,
+                        cancelled=True,
+                        build_exit_code=None,
                         stdout_hash=None,
                         stderr_hash=None,
                         report_digest=None,
                         truncated=False,
                         resources=ResourceUsage(
                             duration=0.0,
-                            allocated_cpu=1.0,
-                            cpu_seconds=0.0,
+                            allocated_cpu=None,
+                            cpu_seconds=None,
                             peak_memory=None,
                             model_usage=None,
                             estimated_cost=None,
                             pricing_version=None,
-                            bytes_written=0,
+                            bytes_written=None,
                         ),
-                        runtime_error=None,
+                        runtime_error=ErrorCode.LEASE_LOST.value,
                     )
                 else:
-                    cmd_spec = resolve_command(
-                        manifest.command,
-                        paths,
-                        cwd=str(source_dir),
-                        timeout_seconds=manifest.timeout_seconds,
-                    )
-                    capture = execute(
-                        job=current_job,
-                        command=cmd_spec.argv,
-                        workspace=source_dir,
-                        out_dir=out_dir,
-                        timeout_seconds=manifest.timeout_seconds,
-                        env=dict(cmd_spec.env),
-                        report_path=manifest.report_path,
-                    )
+                    paths = {
+                        "workspace": str(source_dir),
+                        "verifier": str(source_dir),
+                        "out": str(out_dir),
+                        "seed": "0",
+                    }
+
+                    build_exit_code = None
+                    if manifest.build_command:
+                        build_spec = resolve_command(
+                            manifest.build_command,
+                            paths,
+                            cwd=str(source_dir),
+                            timeout_seconds=manifest.timeout_seconds,
+                        )
+                        b_capture = execute(
+                            job=current_job,
+                            command=build_spec.argv,
+                            workspace=source_dir,
+                            out_dir=out_dir,
+                            timeout_seconds=manifest.timeout_seconds,
+                            env=dict(build_spec.env),
+                        )
+                        build_exit_code = b_capture.exit_code
+
+                    if build_exit_code is not None and build_exit_code != 0:
+                        capture = ExecutionCapture(
+                            attempt_id=attempt_id,
+                            exit_code=build_exit_code,
+                            timed_out=False,
+                            oom_killed=False,
+                            cancelled=False,
+                            build_exit_code=build_exit_code,
+                            stdout_hash=None,
+                            stderr_hash=None,
+                            report_digest=None,
+                            truncated=False,
+                            resources=ResourceUsage(
+                                duration=0.0,
+                                allocated_cpu=1.0,
+                                cpu_seconds=0.0,
+                                peak_memory=None,
+                                model_usage=None,
+                                estimated_cost=None,
+                                pricing_version=None,
+                                bytes_written=0,
+                            ),
+                            runtime_error=None,
+                        )
+                    elif not lease_lost.is_set():
+                        try:
+                            cmd_spec = resolve_command(
+                                manifest.command,
+                                paths,
+                                cwd=str(source_dir),
+                                timeout_seconds=manifest.timeout_seconds,
+                            )
+                            capture = execute(
+                                job=current_job,
+                                command=cmd_spec.argv,
+                                workspace=source_dir,
+                                out_dir=out_dir,
+                                timeout_seconds=manifest.timeout_seconds,
+                                env=dict(cmd_spec.env),
+                                report_path=manifest.report_path,
+                            )
+                        except (ValidationError, VerifierCIError) as exec_val_err:
+                            err_code = (
+                                exec_val_err.code or ErrorCode.PROTECTION_ERROR.value
+                            )
+                            capture = ExecutionCapture(
+                                attempt_id=attempt_id,
+                                exit_code=1,
+                                timed_out=False,
+                                oom_killed=False,
+                                cancelled=False,
+                                build_exit_code=build_exit_code,
+                                stdout_hash=None,
+                                stderr_hash=None,
+                                report_digest=None,
+                                truncated=False,
+                                resources=ResourceUsage(
+                                    duration=0.0,
+                                    allocated_cpu=1.0,
+                                    cpu_seconds=0.0,
+                                    peak_memory=None,
+                                    model_usage=None,
+                                    estimated_cost=None,
+                                    pricing_version=None,
+                                    bytes_written=0,
+                                ),
+                                runtime_error=err_code,
+                            )
+                        except Exception as exec_err:  # noqa: BLE001
+                            capture = ExecutionCapture(
+                                attempt_id=attempt_id,
+                                exit_code=1,
+                                timed_out=False,
+                                oom_killed=False,
+                                cancelled=False,
+                                build_exit_code=build_exit_code,
+                                stdout_hash=None,
+                                stderr_hash=None,
+                                report_digest=None,
+                                truncated=False,
+                                resources=ResourceUsage(
+                                    duration=0.0,
+                                    allocated_cpu=1.0,
+                                    cpu_seconds=0.0,
+                                    peak_memory=None,
+                                    model_usage=None,
+                                    estimated_cost=None,
+                                    pricing_version=None,
+                                    bytes_written=0,
+                                ),
+                                runtime_error=str(exec_err),
+                            )
+                    else:
+                        capture = ExecutionCapture(
+                            attempt_id=attempt_id,
+                            exit_code=1,
+                            timed_out=False,
+                            oom_killed=False,
+                            cancelled=True,
+                            build_exit_code=None,
+                            stdout_hash=None,
+                            stderr_hash=None,
+                            report_digest=None,
+                            truncated=False,
+                            resources=ResourceUsage(
+                                duration=0.0,
+                                allocated_cpu=None,
+                                cpu_seconds=None,
+                                peak_memory=None,
+                                model_usage=None,
+                                estimated_cost=None,
+                                pricing_version=None,
+                                bytes_written=None,
+                            ),
+                            runtime_error=ErrorCode.LEASE_LOST.value,
+                        )
 
             # Stop heartbeat thread as execution has concluded
             stop_heartbeat.set()
             if hb_thread is not None:
-                hb_thread.join(timeout=2.0)
+                try:
+                    hb_thread.join(timeout=2.0)
+                except Exception:  # noqa: BLE001, S110
+                    pass
+
+            attempt_finished_at = datetime.now(UTC)
 
             # 5. Collect outputs & persist artifacts
             stdout_hash = None
@@ -432,7 +546,7 @@ class Worker:
             evidence_digests: list[str] = []
 
             stdout_file = capture_dir / "stdout.log"
-            if stdout_file.is_file():
+            if stdout_file.is_file() and not stdout_file.is_symlink():
                 s_bytes = stdout_file.read_bytes()
                 if s_bytes:
                     art = self.artifact_store.put_bytes(
@@ -447,7 +561,7 @@ class Worker:
                     evidence_digests.append(art.digest)
 
             stderr_file = capture_dir / "stderr.log"
-            if stderr_file.is_file():
+            if stderr_file.is_file() and not stderr_file.is_symlink():
                 e_bytes = stderr_file.read_bytes()
                 if e_bytes:
                     art = self.artifact_store.put_bytes(
@@ -464,7 +578,7 @@ class Worker:
             report_bytes = None
             if manifest is not None:
                 report_file = out_dir / manifest.report_path
-                if report_file.is_file():
+                if report_file.is_file() and not report_file.is_symlink():
                     max_report_bytes = 16 * 1024 * 1024
                     with report_file.open("rb") as f:
                         report_bytes = f.read(max_report_bytes)
@@ -522,20 +636,33 @@ class Worker:
                     [r for r in parsed_outcome.report.results if r.status == "failed"]
                 )
 
-            disposition: Literal["active", "authoritative", "stale", "abandoned"] = (
-                "stale" if lease_lost.is_set() else "authoritative"
-            )
+            if lease_lost.is_set():
+                disposition: Literal[
+                    "active", "authoritative", "stale", "abandoned"
+                ] = "stale"
+                evaluation_validity: Literal["pending", "valid", "invalid"] = "invalid"
+                outcome: (
+                    Literal["accept", "reject", "invalid_evaluation", "error"] | None
+                ) = (
+                    parsed_outcome.outcome
+                    if parsed_outcome.outcome in ("invalid_evaluation", "error")
+                    else None
+                )
+            else:
+                disposition = "authoritative"
+                evaluation_validity = parsed_outcome.evaluation_validity
+                outcome = parsed_outcome.outcome
 
             attempt = EvaluationAttempt(
                 attempt_id=attempt_id,
                 job_id=current_job.job_id,
                 fence=current_job.fence,
-                outcome=parsed_outcome.outcome,
-                evaluation_validity=parsed_outcome.evaluation_validity,
+                outcome=outcome,
+                evaluation_validity=evaluation_validity,
                 error_code=parsed_outcome.error_code,
                 disposition=disposition,
-                started_at=datetime.now(UTC),
-                finished_at=datetime.now(UTC),
+                started_at=attempt_started_at,
+                finished_at=attempt_finished_at or datetime.now(UTC),
                 exit_code=capture.exit_code,
                 stdout_hash=capture.stdout_hash,
                 stderr_hash=capture.stderr_hash,
@@ -547,19 +674,31 @@ class Worker:
                 artifact_digests=tuple(evidence_digests),
                 capture_truncated=capture.truncated,
             )
+            validate_attempt(attempt)
 
             # 7. Complete job via fenced queue
+            if complete_now_ms is not None:
+                comp_time_ms = complete_now_ms
+            elif now_ms is not None:
+                comp_time_ms = now_ms
+            else:
+                comp_time_ms = self.clock()
+
             with conn_lock:
-                jobs.complete(
-                    conn, current_job, attempt, now_ms=int(time.time() * 1000)
-                )
+                jobs.complete(conn, current_job, attempt, now_ms=comp_time_ms)
             return True
 
         finally:
             stop_heartbeat.set()
             if hb_thread is not None:
-                hb_thread.join(timeout=1.0)
-            cleanup_attempt(attempt_id, self.work_dir)
+                try:
+                    hb_thread.join(timeout=1.0)
+                except Exception:  # noqa: BLE001, S110
+                    pass
+            try:
+                cleanup_attempt(attempt_id, self.work_dir)
+            except Exception:  # noqa: BLE001, S110
+                pass
 
     def run_until_terminal(
         self,
