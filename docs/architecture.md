@@ -1,6 +1,6 @@
 # Architecture
 
-High-level architecture for VerifierCI (currently at Phase 1 through PR 1.4 Unit 3; see `build/VerifierCI-Software-Design-Document.md` §2–§5 for full target specifications).
+High-level architecture for VerifierCI (currently at **Phase 1: Minimal Vertical Slice Complete**; see `build/VerifierCI-Software-Design-Document.md` §2–§5 for full target specifications).
 
 ## Implemented Phase 1 Pipeline
 
@@ -10,9 +10,10 @@ High-level architecture for VerifierCI (currently at Phase 1 through PR 1.4 Unit
 4. **Isolated Execution & Classification (`verifierci.execution.sandbox`, `worker`, `outcomes`, `verifierci.evaluators.pytest_report`):** `Worker` prepares fresh `0700` attempt workspaces, applies diffs via isolated Git, executes fixture commands under monotonic deadlines and capped stream capture, parses structured reports, and commits authoritative attempts through live lease fences (or quarantines stale evidence on lease expiry).
 5. **Acceptance Matrix Reducer (`verifierci.execution.matrix`):** `build_matrix` and `aggregate_cell` select one fence-authoritative attempt per job, aggregate planned repetitions per SDD §8.4, and refuse finalization when planned jobs remain pending unless explicitly requested as provisional.
 6. **Static JSON Reporter (`verifierci.reports.render`):** `render_json` and `ReportRenderer` serialize `AuditResult` envelopes with credential-sanitized artifact URIs via temporary file, `fsync`, and atomic `os.replace`.
-7. **Click CLI & Orchestration (`verifierci.cli`, `verifierci.execution.service`, `verifierci.panels.registry`):** Implements global `--db`/`--artifact-dir`/`--config`/`--json` flags, `task import`, `panel validate`, `audit` group (`invoke_without_command=True`), and strict `0`/`1`/`2`/`3` exit category mapping.
+7. **Click CLI & Orchestration (`verifierci.cli`, `verifierci.execution.service`, `verifierci.panels.registry`, `verifierci.snapshots.registry`):** Implements global `--db`/`--artifact-dir`/`--config`/`--json` flags, `task import`, `panel validate`, `audit` group (`invoke_without_command=True`), trusted fixture digest verification (`SnapshotRegistry`), and strict `0`/`1`/`2`/`3` exit category mapping.
+8. **Canonical Vertical Slice (`examples/retry-contract/`, `datasets/`, `tests/e2e/`):** 1-task, 5-case, 2-verifier, 3-repetition (30-job) fixture suite with weak `v1` and over-specific `v2` verifiers, pinned SHA-256 digests, and synthetic/provisional diagnostic labels.
 
 ## Remaining / Upcoming Components
 
-- **PR 1.4 Remaining:** End-to-end `examples/retry-contract` 30-job vertical slice fixture & verification.
+- **PR 1.4 Complete:** `examples/retry-contract` 30-job vertical slice fixture, `make slice`, and end-to-end CLI verification (`tests/e2e/test_cli_slice.py`, `tests/e2e/test_phase1_vertical_slice.py`).
 - **Phases 2–8:** Full scoring/metrics & property tests, CI gate & HTML reporter, Docker sandbox, external task adapters, independent adjudication/panel workflows, and statistical analysis.

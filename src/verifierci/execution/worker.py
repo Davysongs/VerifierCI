@@ -89,6 +89,7 @@ class Worker:
         lease_duration_ms: int = DEFAULT_LEASE_MS,
         heartbeat_interval_seconds: float = 5.0,
         clock: Callable[[], int] | None = None,
+        expected_snapshot_digests: Mapping[str, str] | None = None,
     ) -> None:
         self.worker_id = worker_id or str(uuid.uuid4())
         self.work_dir = (
@@ -106,6 +107,7 @@ class Worker:
         self.lease_duration_ms = lease_duration_ms
         self.heartbeat_interval_seconds = heartbeat_interval_seconds
         self.clock = clock or (lambda: int(time.time() * 1000))
+        self.expected_snapshot_digests = dict(expected_snapshot_digests or {})
 
     def _resolve_snapshot(self, task_key: str, conn: sqlite3.Connection) -> Path:
         p: Path
@@ -299,12 +301,16 @@ class Worker:
                 hb_thread = threading.Thread(target=_heartbeat_worker, daemon=True)
                 hb_thread.start()
 
+                expected_snap_digest = self.expected_snapshot_digests.get(
+                    current_job.task_key
+                )
                 attempt_dir = prepare_workspace(
                     job=current_job,
                     snapshot_dir=snapshot_dir,
                     diff_bytes=diff_bytes,
                     allowed_paths=manifest.allowed_edit_paths,
                     root=self.work_dir,
+                    expected_snapshot_digest=expected_snap_digest,
                 )
                 source_dir = attempt_dir / "source"
                 out_dir = attempt_dir / "out"

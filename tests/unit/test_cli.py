@@ -71,7 +71,7 @@ def _create_cli_task_fixture(root: Path, *, script_body: str = "") -> dict[str, 
         f"verifier_id: cli-v1\n"
         f"version: '1.0.0'\n"
         f"mode: compatibility\n"
-        f"command: ['{sys.executable}', '{runner_script}', '{{out}}']\n"
+        f"command: {json.dumps([sys.executable, str(runner_script), '{out}'])}\n"
         f"expected_collection: ['tests/test_app.py::test_ok']\n"
         f"required_pass_ids: ['tests/test_app.py::test_ok']\n"
         f"allowed_edit_paths: ['*']\n"
@@ -83,7 +83,7 @@ def _create_cli_task_fixture(root: Path, *, script_body: str = "") -> dict[str, 
         f"verifier_id: cli-v2\n"
         f"version: '1.0.0'\n"
         f"mode: compatibility\n"
-        f"command: ['{sys.executable}', '{runner_script}', '{{out}}']\n"
+        f"command: {json.dumps([sys.executable, str(runner_script), '{out}'])}\n"
         f"expected_collection: ['tests/test_app.py::test_ok']\n"
         f"required_pass_ids: ['tests/test_app.py::test_ok']\n"
         f"allowed_edit_paths: ['*']\n"
@@ -615,3 +615,91 @@ def test_audit_command_exit_category_mapping_and_diagnostics() -> None:
         render_diagnostic("VALIDATION_ERROR", "bad flag", json_output=False)
         == "[VALIDATION_ERROR] bad flag"
     )
+
+
+def test_review_hardening_invariants(tmp_path: Path) -> None:
+    from verifierci.adapters.local import load_local_verifier_with_bytes
+    from verifierci.panels.registry import load_and_validate_panel
+    from verifierci.snapshots.registry import SnapshotRegistry
+
+    # 1. Malformed timeout_seconds & scalar sequence rejection in load_local_verifier
+    bad_timeout = tmp_path / "bad_timeout.yaml"
+    bad_timeout.write_text(
+        "verifier_id: v\nversion: '1.0.0'\ncommand: ['true']\ntimeout_seconds: null\n",
+        encoding="utf-8",
+    )
+    try:
+        load_local_verifier_with_bytes(bad_timeout)
+        raise AssertionError("Expected ValidationError for timeout_seconds: null")
+    except ValidationError:
+        pass
+
+    bad_seq = tmp_path / "bad_seq.yaml"
+    bad_seq.write_text(
+        "verifier_id: v\nversion: '1.0.0'\ncommand: ['true']\nallowed_edit_paths: 'src/'\n",
+        encoding="utf-8",
+    )
+    try:
+        load_local_verifier_with_bytes(bad_seq)
+        raise AssertionError("Expected ValidationError for scalar allowed_edit_paths")
+    except ValidationError:
+        pass
+
+    # 2. Panel registry: invalid UTF-8, single-record envelope unwrapping, split scalar check, versioned adjudication_id
+    bad_utf8 = tmp_path / "bad_utf8.jsonl"
+    bad_utf8.write_bytes(b"\xff\xfe\xfd")
+    try:
+        load_and_validate_panel(bad_utf8)
+        raise AssertionError("Expected ValidationError on invalid UTF-8 panel")
+    except ValidationError:
+        pass
+
+    env_panel = tmp_path / "env_panel.jsonl"
+    env_panel.write_text(
+        json.dumps(
+            {
+                "schema_version": "1.0.0",
+                "kind": "PatchPanel",
+                "data": {
+                    "panel_id": "env-p",
+                    "version": "1.0.0",
+                    "split": "development",
+                    "cases": [
+                        {
+                            "case_id": "c1",
+                            "role": "noop",
+                            "source": "noop",
+                            "family_id": "ctrl",
+                            "adjudication": {
+                                "version": 2,
+                                "label": "valid",
+                                "review_status": "independent",
+                                "rationale": "ok",
+                            },
+                        }
+                    ],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    p_res = load_and_validate_panel(env_panel)
+    assert p_res.panel.panel_key == "env-p@1.0.0"
+    assert p_res.adjudications[0].version == 2
+
+    # 3. SnapshotRegistry rejects unpinned verifier on registered fixture
+    reg = SnapshotRegistry.from_manifests_dir()
+    rec = reg.get("retry-contract@1.0.0")
+    assert rec is not None
+    try:
+        reg.verify_fixture(
+            task_key=rec.task_key,
+            contract_hash=rec.contract_hash,
+            snapshot_digest=rec.snapshot_digest,
+            panel_key=rec.panel_key,
+            verifier_digests={"rogue@1.0.0": ("0" * 64, "1" * 64)},
+            case_diff_digests=dict(rec.trusted_case_diffs),
+        )
+        raise AssertionError("Expected ProtectionError for unpinned verifier")
+    except ProtectionError as exc:
+        assert exc.code == ErrorCode.DIGEST_MISMATCH.value

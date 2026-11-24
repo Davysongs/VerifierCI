@@ -14,7 +14,7 @@ import os
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from verifierci.errors import (
     ErrorCode,
@@ -117,7 +117,13 @@ def _parse_panel_payload(
             code=ErrorCode.ARTIFACT_LIMIT.value,
         )
 
-    raw_text = panel_path.read_text(encoding="utf-8").strip()
+    try:
+        raw_text = panel_path.read_text(encoding="utf-8").strip()
+    except UnicodeDecodeError as exc:
+        raise ValidationError(
+            f"Panel file is not valid UTF-8 ({panel_path}): {exc}",
+            code=ErrorCode.VALIDATION_ERROR.value,
+        ) from exc
     if not raw_text:
         raise ValidationError(
             f"Panel file is empty: {panel_path}",
@@ -128,6 +134,15 @@ def _parse_panel_payload(
     try:
         doc = json.loads(raw_text)
         if isinstance(doc, dict):
+            if (
+                "schema_version" in doc
+                and "kind" in doc
+                and "data" in doc
+                and isinstance(doc["data"], dict)
+            ):
+                inner = dict(doc["data"])
+                inner.setdefault("_kind", doc["kind"])
+                doc = inner
             cases = doc.get("cases", [])
             if not isinstance(cases, list):
                 raise ValidationError(
@@ -207,11 +222,12 @@ def load_and_validate_panel(
             "Panel missing required 'version'.",
             code=ErrorCode.VALIDATION_ERROR.value,
         )
-    if split not in _VALID_SPLITS:
+    if not isinstance(split, str) or split not in _VALID_SPLITS:
         raise ValidationError(
             f"Invalid panel split '{split}'. Expected one of {sorted(_VALID_SPLITS)}.",
             code=ErrorCode.VALIDATION_ERROR.value,
         )
+    split_lit = cast(Literal["development", "assessment", "train"], split)
 
     if expected_split is not None and split != expected_split:
         raise ProtectionError(
@@ -257,19 +273,23 @@ def load_and_validate_panel(
             )
         seen_case_ids.add(case_id)
 
-        role = raw_c.get("role")
-        if role not in _VALID_ROLES:
+        role_raw = raw_c.get("role")
+        if not isinstance(role_raw, str) or role_raw not in _VALID_ROLES:
             raise ValidationError(
-                f"Case '{case_id}' has invalid role '{role}'. Expected one of {sorted(_VALID_ROLES)}.",
+                f"Case '{case_id}' has invalid role '{role_raw}'. Expected one of {sorted(_VALID_ROLES)}.",
                 code=ErrorCode.VALIDATION_ERROR.value,
             )
+        role = cast(Literal["challenge", "reference", "noop"], role_raw)
 
-        source = raw_c.get("source")
-        if source not in _VALID_SOURCES:
+        source_raw = raw_c.get("source")
+        if not isinstance(source_raw, str) or source_raw not in _VALID_SOURCES:
             raise ValidationError(
-                f"Case '{case_id}' has invalid source '{source}'. Expected one of {sorted(_VALID_SOURCES)}.",
+                f"Case '{case_id}' has invalid source '{source_raw}'. Expected one of {sorted(_VALID_SOURCES)}.",
                 code=ErrorCode.VALIDATION_ERROR.value,
             )
+        source = cast(
+            Literal["human", "agent", "mutation", "reference", "noop"], source_raw
+        )
 
         family_id = raw_c.get("family_id")
         if not isinstance(family_id, str) or not family_id.strip():
@@ -293,16 +313,31 @@ def load_and_validate_panel(
                 code=ErrorCode.VALIDATION_ERROR.value,
             )
 
-        label = raw_adj.get("label")
-        if label not in _VALID_LABELS:
+        label_raw = raw_adj.get("label")
+        if not isinstance(label_raw, str) or label_raw not in _VALID_LABELS:
             raise ValidationError(
-                f"Case '{case_id}' has invalid adjudication label '{label}'.",
+                f"Case '{case_id}' has invalid adjudication label '{label_raw}'.",
                 code=ErrorCode.VALIDATION_ERROR.value,
             )
-        review_status = raw_adj.get("review_status")
-        if review_status not in _VALID_REVIEW_STATUSES:
+        label = cast(Literal["valid", "invalid", "unresolved"], label_raw)
+        review_raw = raw_adj.get("review_status")
+        if not isinstance(review_raw, str) or review_raw not in _VALID_REVIEW_STATUSES:
             raise ValidationError(
-                f"Case '{case_id}' has invalid review_status '{review_status}'.",
+                f"Case '{case_id}' has invalid review_status '{review_raw}'.",
+                code=ErrorCode.VALIDATION_ERROR.value,
+            )
+        review_status = cast(
+            Literal["provisional", "independent", "disputed"], review_raw
+        )
+        raw_adj_ver = raw_adj.get("version", 1)
+        if (
+            isinstance(raw_adj_ver, bool)
+            or not isinstance(raw_adj_ver, int)
+            or raw_adj_ver < 1
+        ):
+            raise ValidationError(
+                f"Case '{case_id}' adjudication version must be a positive integer, "
+                f"got {raw_adj_ver!r}.",
                 code=ErrorCode.VALIDATION_ERROR.value,
             )
         if review_status == "disputed" and label != "unresolved":
@@ -324,13 +359,31 @@ def load_and_validate_panel(
 
         # Resolve optional diff / witness artifact references
         diff_field = raw_c.get("diff", "")
+        if diff_field is None:
+            diff_field = ""
+        if not isinstance(diff_field, str):
+            raise ValidationError(
+                f"Case '{case_id}' field 'diff' must be a string, got {type(diff_field).__name__}.",
+                code=ErrorCode.VALIDATION_ERROR.value,
+            )
         diff_bytes = b""
-        if isinstance(diff_field, str) and diff_field:
+        if diff_field:
             if diff_field.startswith("diff --git ") or "\n" in diff_field:
                 diff_bytes = diff_field.encode("utf-8")
+                if len(diff_bytes) > MAX_PANEL_BYTES:
+                    raise ValidationError(
+                        f"Inline diff for case '{case_id}' exceeds limit of {MAX_PANEL_BYTES} bytes.",
+                        code=ErrorCode.ARTIFACT_LIMIT.value,
+                    )
             else:
                 diff_path = _resolve_panel_artifact(root_dir, diff_field)
                 if diff_path.is_file():
+                    diff_size = diff_path.stat().st_size
+                    if diff_size > MAX_PANEL_BYTES:
+                        raise ValidationError(
+                            f"Diff artifact '{diff_field}' exceeds limit of {MAX_PANEL_BYTES} bytes.",
+                            code=ErrorCode.ARTIFACT_LIMIT.value,
+                        )
                     try:
                         diff_bytes = diff_path.read_bytes()
                     except OSError as exc:
@@ -350,31 +403,66 @@ def load_and_validate_panel(
 
         witness_ref = raw_adj.get("witness")
         witness_ids: tuple[str, ...] = ()
-        if isinstance(witness_ref, str) and witness_ref:
-            witness_ids = (witness_ref,)
-            w_path = _resolve_panel_artifact(root_dir, witness_ref)
-            if w_path.is_file():
-                try:
-                    _ = w_path.read_bytes()
-                except OSError as exc:
+        if witness_ref is not None:
+            if not isinstance(witness_ref, str) or (
+                verify_artifacts and not witness_ref.strip()
+            ):
+                raise ValidationError(
+                    f"Case '{case_id}' has invalid 'witness' reference: {witness_ref!r}.",
+                    code=ErrorCode.VALIDATION_ERROR.value,
+                )
+            if witness_ref:
+                witness_ids = (witness_ref,)
+                w_path = _resolve_panel_artifact(root_dir, witness_ref)
+                if w_path.is_file():
+                    if w_path.stat().st_size > MAX_PANEL_BYTES:
+                        raise ValidationError(
+                            f"Witness artifact '{witness_ref}' exceeds limit of {MAX_PANEL_BYTES} bytes.",
+                            code=ErrorCode.ARTIFACT_LIMIT.value,
+                        )
+                    try:
+                        with w_path.open("rb") as wf:
+                            while wf.read(65536):
+                                pass
+                    except OSError as exc:
+                        raise InfrastructureError(
+                            f"Failed to read witness artifact '{witness_ref}' for case '{case_id}': {exc}",
+                            code=ErrorCode.INFRASTRUCTURE_ERROR.value,
+                        ) from exc
+                elif verify_artifacts:
                     raise InfrastructureError(
-                        f"Failed to read witness artifact '{witness_ref}' for case '{case_id}': {exc}",
+                        f"Missing witness artifact '{witness_ref}' referenced by case '{case_id}'.",
                         code=ErrorCode.INFRASTRUCTURE_ERROR.value,
-                    ) from exc
-            elif verify_artifacts:
-                raise InfrastructureError(
-                    f"Missing witness artifact '{witness_ref}' referenced by case '{case_id}'.",
-                    code=ErrorCode.INFRASTRUCTURE_ERROR.value,
-                )
-            else:
-                findings.append(
-                    f"Witness path '{witness_ref}' for case '{case_id}' not present locally."
-                )
+                    )
+                else:
+                    findings.append(
+                        f"Witness path '{witness_ref}' for case '{case_id}' not present locally."
+                    )
 
         diff_digest = hashlib.sha256(diff_bytes).hexdigest()
         case_diffs[case_id] = diff_bytes
 
-        case_task_key = str(raw_c.get("task_key", effective_task_key))
+        declared_case_task = raw_c.get("task_key")
+        if declared_case_task is not None:
+            if (
+                not isinstance(declared_case_task, str)
+                or not declared_case_task.strip()
+            ):
+                raise ValidationError(
+                    f"Case '{case_id}' has invalid 'task_key': {declared_case_task!r}.",
+                    code=ErrorCode.VALIDATION_ERROR.value,
+                )
+            if task_key and declared_case_task != task_key:
+                raise ValidationError(
+                    f"Case '{case_id}' declares task_key '{declared_case_task}', "
+                    f"which conflicts with audit task_key '{task_key}'.",
+                    code=ErrorCode.VALIDATION_ERROR.value,
+                )
+        case_task_key = (
+            declared_case_task
+            if isinstance(declared_case_task, str)
+            else effective_task_key
+        )
         prov_digest = hashlib.sha256(
             json.dumps(raw_c, sort_keys=True).encode("utf-8")
         ).hexdigest()
@@ -396,11 +484,28 @@ def load_and_validate_panel(
         cases.append(case_obj)
 
         rationale = str(raw_adj.get("rationale", ""))
+        req_hashes = tuple(str(r) for r in raw_adj.get("requirement_hashes", ()))
+        uncertainty_val = str(raw_adj.get("uncertainty", ""))
+        supersedes_val = raw_adj.get("supersedes_id")
+        adj_id_payload = {
+            "case_id": case_id,
+            "contract_hash": effective_contract_hash,
+            "version": raw_adj_ver,
+            "label": label,
+            "review_status": review_status,
+            "rationale": rationale,
+            "requirement_hashes": list(req_hashes),
+            "witness_ids": list(witness_ids),
+            "uncertainty": uncertainty_val,
+            "supersedes_id": supersedes_val,
+        }
         adj_id = str(
             raw_adj.get(
                 "adjudication_id",
                 hashlib.sha256(
-                    f"{case_id}:{effective_contract_hash}:{label}:{rationale}".encode()
+                    json.dumps(
+                        adj_id_payload, sort_keys=True, separators=(",", ":")
+                    ).encode("utf-8")
                 ).hexdigest(),
             )
         )
@@ -408,17 +513,15 @@ def load_and_validate_panel(
             adjudication_id=adj_id,
             case_id=case_id,
             contract_hash=effective_contract_hash,
-            version=int(raw_adj.get("version", 1)),
+            version=raw_adj_ver,
             label=label,
             review_status=review_status,
             votes=(),
             rationale=rationale,
-            requirement_hashes=tuple(
-                str(r) for r in raw_adj.get("requirement_hashes", ())
-            ),
+            requirement_hashes=req_hashes,
             witness_ids=witness_ids,
-            uncertainty=str(raw_adj.get("uncertainty", "")),
-            supersedes_id=raw_adj.get("supersedes_id"),
+            uncertainty=uncertainty_val,
+            supersedes_id=supersedes_val,
             created_at=now,
         )
         adjudications.append(adj_obj)
@@ -451,7 +554,7 @@ def load_and_validate_panel(
         panel_key=panel_key,
         panel_id=panel_id,
         version=version,
-        split=split,
+        split=split_lit,
         membership_digest=m_digest,
         sampling_policy=str(sampling_policy),
         exposed_at=None,

@@ -49,22 +49,24 @@ test-e2e:
 SLICE_TMP ?= /tmp/verifierci-slice
 
 slice:
-	rm -rf "$(SLICE_TMP)" && mkdir -p "$(SLICE_TMP)"
-	PYTHONPATH=src $(PYTHON) -m verifierci.cli \
-		--db "$(SLICE_TMP)/state.sqlite" \
-		--artifact-dir "$(SLICE_TMP)/artifacts" \
-		--json \
-		audit \
-		--task examples/retry-contract/task.yaml \
-		--panel examples/retry-contract/panel.jsonl \
-		--baseline examples/retry-contract/v1.yaml \
-		--candidate examples/retry-contract/v2.yaml \
-		--backend fixture \
-		--trusted-fixture \
-		--diagnostic \
-		--collect-only \
-		--repetitions 3 \
-		--output-dir "$(SLICE_TMP)/out"
+	@mkdir -p "$(SLICE_TMP)"
+	@SLICE_RUN_DIR="$$(mktemp -d "$(SLICE_TMP)/run-XXXXXX")" && \
+		echo "Slice run directory: $$SLICE_RUN_DIR" >&2 && \
+		PYTHONPATH=src $(PYTHON) -m verifierci.cli \
+			--db "$$SLICE_RUN_DIR/state.sqlite" \
+			--artifact-dir "$$SLICE_RUN_DIR/artifacts" \
+			--json \
+			audit \
+			--task examples/retry-contract/task.yaml \
+			--panel examples/retry-contract/panel.jsonl \
+			--baseline examples/retry-contract/v1.yaml \
+			--candidate examples/retry-contract/v2.yaml \
+			--backend fixture \
+			--trusted-fixture \
+			--diagnostic \
+			--collect-only \
+			--repetitions 3 \
+			--output-dir "$$SLICE_RUN_DIR/out"
 
 
 test-property:

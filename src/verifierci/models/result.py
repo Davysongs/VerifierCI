@@ -122,6 +122,25 @@ def validate_matrix(matrix: AcceptanceMatrix, manifest: AuditManifest) -> None:
         raise ValidationError(
             f"Matrix run_id '{matrix.run_id}' does not match manifest run_id '{manifest.run_id}'."
         )
+    allowed_cells: set[tuple[str, str, str]] = set()
+    for pin in manifest.task_pins:
+        verifiers = tuple(
+            v
+            for v in dict.fromkeys(
+                (pin.verifier_baseline_version, pin.verifier_candidate_version)
+            )
+            if v
+        )
+        for cid in pin.case_ids:
+            for vk in verifiers:
+                allowed_cells.add((pin.task_key, cid, vk))
+    if allowed_cells:
+        for cell in matrix.cells:
+            coord = (cell.task_key, cell.case_id, cell.verifier_key)
+            if coord not in allowed_cells:
+                raise ValidationError(
+                    f"AcceptanceMatrix contains unplanned cell coordinate {coord}."
+                )
 
 
 @dataclass(frozen=True, slots=True)

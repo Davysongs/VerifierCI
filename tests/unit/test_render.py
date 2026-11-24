@@ -377,3 +377,16 @@ def test_report_renderer_methods_and_summary(tmp_path: Path) -> None:
         renderer.render_html(result, tmp_path / "out.html")
     with pytest.raises(NotImplementedError):
         render_html(result, tmp_path / "out.html")
+
+
+def test_sanitize_storage_uri_handles_scheme_relative_authorities() -> None:
+    from verifierci.reports.render import _sanitize_storage_uri
+
+    sanitized = _sanitize_storage_uri(
+        "//alice:secret@storage.example.org/bucket/file.json?token=xyz&keep=1#frag"
+    )
+    assert "alice" not in sanitized
+    assert "secret" not in sanitized
+    assert "token" not in sanitized
+    assert "frag" not in sanitized
+    assert sanitized == "//storage.example.org/bucket/file.json?keep=1"

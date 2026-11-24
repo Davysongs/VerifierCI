@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -671,11 +672,12 @@ def audit_group(
 
 def main(argv: Sequence[str] | None = None) -> int:
     """Entry point for verifierci console script and programmatic invocation."""
-    args = list(argv) if argv is not None else None
-    json_output = bool(args and "--json" in args)
+    explicit_args = list(argv) if argv is not None else None
+    effective_args = explicit_args if explicit_args is not None else sys.argv[1:]
+    json_output = "--json" in effective_args
     try:
-        cli.main(args=args, prog_name="verifierci", standalone_mode=False)
-        return 0
+        rc = cli.main(args=explicit_args, prog_name="verifierci", standalone_mode=False)
+        return 0 if rc is None else int(rc)
     except click.exceptions.Exit as exc:
         return int(exc.exit_code)
     except click.UsageError as exc:

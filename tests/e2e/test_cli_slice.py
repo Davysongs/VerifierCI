@@ -113,13 +113,19 @@ def _assert_slice_result(
     finally:
         conn.close()
 
-    # Verify atomic output files on disk
+    # Verify atomic output files and COMPLETE.json boundary on disk
     report_path = out_dir / "report.json"
     summary_path = out_dir / "summary.txt"
     manifest_path = out_dir / "manifest.json"
+    complete_path = out_dir / "COMPLETE.json"
     assert report_path.is_file()
     assert summary_path.is_file()
     assert manifest_path.is_file()
+    assert complete_path.is_file()
+
+    complete_doc = json.loads(complete_path.read_text(encoding="utf-8"))
+    assert complete_doc["run_id"] == run_id
+    assert complete_doc["matrix_id"] == matrix["matrix_id"]
 
     disk_report = json.loads(report_path.read_text(encoding="utf-8"))
     assert disk_report["data"]["gate"] is None
@@ -432,3 +438,36 @@ def test_subprocess_cli_metadata_flags(flag_args: list[str]) -> None:
         )
         assert proc.returncode == 0, proc.stderr
         assert proc.stdout.strip()
+
+
+def test_subprocess_task_import_nonexistent_config_exits_2(tmp_path: Path) -> None:
+    missing_cfg = tmp_path / "does_not_exist.yaml"
+    proc = subprocess.run(
+        _cli_executable()
+        + [
+            "--config",
+            str(missing_cfg),
+            "--json",
+            "task",
+            "import",
+            "--adapter",
+            "local",
+            "--instance",
+            "retry-contract",
+            "--source",
+            str(RETRY_DIR / "task.yaml"),
+            "--source-revision",
+            "1.0.0",
+            "--dry-run",
+        ],
+        cwd=REPO_ROOT,
+        env=_subprocess_env(),
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+    assert proc.returncode == 2
+    diag = json.loads(proc.stderr)
+    assert diag["kind"] == "Diagnostic"
+    assert diag["data"]["code"] == ErrorCode.VALIDATION_ERROR.value

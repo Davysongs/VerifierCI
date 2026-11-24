@@ -70,9 +70,9 @@ class RestrictedSafeLoader(yaml.SafeLoader):
             self._depth -= 1
 
 
-def _safe_load_yaml(path: Path) -> dict[str, Any]:
-    """Load and validate a YAML file with security constraints."""
-    if path.is_symlink():
+def _safe_load_yaml_with_bytes(path: Path) -> tuple[bytes, dict[str, Any]]:
+    """Read raw YAML bytes once under security bounds and parse mapping root."""
+    if path.is_symlink() or os.path.islink(path):
         raise ProtectionError(
             f"Symlink rejected in local manifest loading: {path}",
             code=ErrorCode.PROTECTION_ERROR.value,
@@ -82,13 +82,26 @@ def _safe_load_yaml(path: Path) -> dict[str, Any]:
             f"Manifest file not found: {path}",
             code=ErrorCode.VALIDATION_ERROR.value,
         )
-    if path.stat().st_size > MAX_MANIFEST_BYTES:
+    size = path.stat().st_size
+    if size > MAX_MANIFEST_BYTES:
         raise ValidationError(
-            f"Manifest size {path.stat().st_size} exceeds limit of {MAX_MANIFEST_BYTES} bytes.",
+            f"Manifest size {size} exceeds limit of {MAX_MANIFEST_BYTES} bytes.",
             code=ErrorCode.ARTIFACT_LIMIT.value,
         )
 
-    content = path.read_text(encoding="utf-8")
+    raw_bytes = path.read_bytes()
+    if len(raw_bytes) > MAX_MANIFEST_BYTES:
+        raise ValidationError(
+            f"Manifest size {len(raw_bytes)} exceeds limit of {MAX_MANIFEST_BYTES} bytes.",
+            code=ErrorCode.ARTIFACT_LIMIT.value,
+        )
+    try:
+        content = raw_bytes.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValidationError(
+            f"Failed to decode UTF-8 YAML manifest {path}: {exc}",
+            code=ErrorCode.VALIDATION_ERROR.value,
+        ) from exc
     try:
         data = yaml.load(content, Loader=RestrictedSafeLoader)
     except yaml.YAMLError as exc:
@@ -102,7 +115,39 @@ def _safe_load_yaml(path: Path) -> dict[str, Any]:
             f"Root of manifest {path} must be a mapping, got {type(data).__name__}.",
             code=ErrorCode.VALIDATION_ERROR.value,
         )
+    return raw_bytes, data
+
+
+def _safe_load_yaml(path: Path) -> dict[str, Any]:
+    """Load and validate a YAML file with security constraints."""
+    _, data = _safe_load_yaml_with_bytes(path)
     return data
+
+
+def hash_snapshot_directory(snapshot_dir: Path) -> str:
+    """Hash a snapshot directory canonically with relative POSIX paths, rejecting symlinks."""
+    if snapshot_dir.is_symlink() or os.path.islink(snapshot_dir):
+        raise ProtectionError(
+            f"Symlink rejected for snapshot root directory: {snapshot_dir}",
+            code=ErrorCode.PROTECTION_ERROR.value,
+        )
+    if not snapshot_dir.is_dir():
+        raise ValidationError(
+            f"Snapshot directory not found or not a directory: {snapshot_dir}",
+            code=ErrorCode.VALIDATION_ERROR.value,
+        )
+    hasher = hashlib.sha256()
+    for child in sorted(snapshot_dir.rglob("*")):
+        if child.is_symlink() or os.path.islink(child):
+            raise ProtectionError(
+                f"Symlinks are prohibited in snapshot files: {child.relative_to(snapshot_dir)}",
+                code=ErrorCode.PROTECTION_ERROR.value,
+            )
+        if child.is_file():
+            rel_posix = child.relative_to(snapshot_dir).as_posix()
+            hasher.update((rel_posix + "\0").encode("utf-8"))
+            hasher.update(child.read_bytes())
+    return hasher.hexdigest()
 
 
 def _safe_load_yaml_any(path: Path) -> Any:
@@ -311,48 +356,106 @@ def read_local_manifest(
     )
 
 
-def load_local_verifier(
+_MISSING = object()
+
+
+def _validate_str_list(
+    raw_val: Any,
+    *,
+    field: str,
+    verifier_path: Path,
+    allow_empty: bool = True,
+) -> tuple[str, ...]:
+    """Validate that raw_val is a list/tuple of non-empty strings."""
+    if not isinstance(raw_val, (list, tuple)):
+        raise ValidationError(
+            f"Verifier '{verifier_path}' field '{field}' must be a list of strings, "
+            f"got {type(raw_val).__name__}.",
+            code=ErrorCode.VALIDATION_ERROR.value,
+        )
+    if not allow_empty and not raw_val:
+        raise ValidationError(
+            f"Verifier '{verifier_path}' field '{field}' must be a non-empty list.",
+            code=ErrorCode.VALIDATION_ERROR.value,
+        )
+    items: list[str] = []
+    for idx, elem in enumerate(raw_val):
+        if not isinstance(elem, str) or not elem:
+            raise ValidationError(
+                f"Verifier '{verifier_path}' field '{field}[{idx}]' must be a non-empty string.",
+                code=ErrorCode.VALIDATION_ERROR.value,
+            )
+        items.append(elem)
+    return tuple(items)
+
+
+def load_local_verifier_with_bytes(
     verifier_path: Path,
     *,
     default_verifier_id: str | None = None,
     compatible_contract_hashes: tuple[str, ...] = (),
-) -> tuple[VerifierVersion, VerifierManifest]:
-    """Load and validate a local verifier YAML file into typed VerifierVersion and VerifierManifest."""
-    if verifier_path.is_symlink() or os.path.islink(verifier_path):
-        raise ProtectionError(
-            f"Symlink rejected in verifier loading: {verifier_path}",
-            code=ErrorCode.PROTECTION_ERROR.value,
-        )
-    if not verifier_path.is_file():
-        raise ValidationError(
-            f"Verifier file not found: {verifier_path}",
-            code=ErrorCode.VALIDATION_ERROR.value,
-        )
-
-    verifier_data = _safe_load_yaml(verifier_path)
+) -> tuple[VerifierVersion, VerifierManifest, bytes]:
+    """Load and validate a local verifier YAML once, returning exact raw payload bytes."""
+    raw_bytes, verifier_data = _safe_load_yaml_with_bytes(verifier_path)
     raw_manifest = verifier_data.get("manifest")
     manifest_src: Mapping[str, Any] = (
         raw_manifest if isinstance(raw_manifest, Mapping) else verifier_data
     )
 
-    raw_cmd = manifest_src.get("command", ["pytest", "tests/"])
-    if not isinstance(raw_cmd, (list, tuple)) or not raw_cmd:
-        raise ValidationError(
-            f"Verifier '{verifier_path}' command must be a non-empty list.",
-            code=ErrorCode.VALIDATION_ERROR.value,
-        )
-    v_cmd = tuple(str(x) for x in raw_cmd)
-    v_bcmd = tuple(str(x) for x in manifest_src.get("build_command", []))
-    v_exp = tuple(str(x) for x in manifest_src.get("expected_collection", []))
-    v_req = tuple(str(x) for x in manifest_src.get("required_pass_ids", []))
-    v_skips = tuple(str(x) for x in manifest_src.get("permitted_skips", []))
-    v_edits = tuple(str(x) for x in manifest_src.get("allowed_edit_paths", ["src/"]))
-    v_timeout = int(manifest_src.get("timeout_seconds", 60))
+    v_cmd = _validate_str_list(
+        manifest_src.get("command", ["pytest", "tests/"]),
+        field="command",
+        verifier_path=verifier_path,
+        allow_empty=False,
+    )
+    v_bcmd = _validate_str_list(
+        manifest_src.get("build_command", ()),
+        field="build_command",
+        verifier_path=verifier_path,
+        allow_empty=True,
+    )
+    v_exp = _validate_str_list(
+        manifest_src.get("expected_collection", ()),
+        field="expected_collection",
+        verifier_path=verifier_path,
+        allow_empty=True,
+    )
+    v_req = _validate_str_list(
+        manifest_src.get("required_pass_ids", ()),
+        field="required_pass_ids",
+        verifier_path=verifier_path,
+        allow_empty=True,
+    )
+    v_skips = _validate_str_list(
+        manifest_src.get("permitted_skips", ()),
+        field="permitted_skips",
+        verifier_path=verifier_path,
+        allow_empty=True,
+    )
+    v_edits = _validate_str_list(
+        manifest_src.get("allowed_edit_paths", ("src/",)),
+        field="allowed_edit_paths",
+        verifier_path=verifier_path,
+        allow_empty=True,
+    )
+
+    raw_timeout = manifest_src.get("timeout_seconds", _MISSING)
+    if raw_timeout is _MISSING:
+        v_timeout = 60
+    else:
+        if isinstance(raw_timeout, bool) or not isinstance(raw_timeout, int):
+            raise ValidationError(
+                f"Verifier '{verifier_path}' timeout_seconds must be an integer, "
+                f"got {raw_timeout!r}.",
+                code=ErrorCode.VALIDATION_ERROR.value,
+            )
+        v_timeout = raw_timeout
     if v_timeout <= 0:
         raise ValidationError(
             f"Verifier '{verifier_path}' timeout_seconds must be > 0, got {v_timeout}.",
             code=ErrorCode.VALIDATION_ERROR.value,
         )
+
     v_parser = str(manifest_src.get("parser_id", "pytest-report-v1"))
     v_report_path = str(manifest_src.get("report_path", "report.json"))
     v_mode = manifest_src.get("mode", "compatibility")
@@ -362,7 +465,7 @@ def load_local_verifier(
             code=ErrorCode.VALIDATION_ERROR.value,
         )
 
-    payload_digest = hashlib.sha256(verifier_path.read_bytes()).hexdigest()
+    payload_digest = hashlib.sha256(raw_bytes).hexdigest()
     v_man_obj = VerifierManifest(
         manifest_hash="temp",
         mode=v_mode,
@@ -407,6 +510,21 @@ def load_local_verifier(
         compatible_contract_hashes=compatible_contract_hashes,
         created_at=datetime.now(UTC),
     )
+    return verifier, verifier_manifest, raw_bytes
+
+
+def load_local_verifier(
+    verifier_path: Path,
+    *,
+    default_verifier_id: str | None = None,
+    compatible_contract_hashes: tuple[str, ...] = (),
+) -> tuple[VerifierVersion, VerifierManifest]:
+    """Load and validate a local verifier YAML file into typed VerifierVersion and VerifierManifest."""
+    verifier, verifier_manifest, _ = load_local_verifier_with_bytes(
+        verifier_path,
+        default_verifier_id=default_verifier_id,
+        compatible_contract_hashes=compatible_contract_hashes,
+    )
     return verifier, verifier_manifest
 
 
@@ -437,8 +555,10 @@ class LocalAdapter(TaskAdapter):
                 code=ErrorCode.VALIDATION_ERROR.value,
             )
 
-    def import_task(self, request: ImportRequest) -> ImportBundle:
-        """Import a native task from its local manifest path."""
+    def import_task_with_bytes(
+        self, request: ImportRequest
+    ) -> tuple[ImportBundle, bytes]:
+        """Import a native task and also return the verified verifier YAML bytes."""
         manifest_path = Path(request.source)
         if manifest_path.is_symlink() or os.path.islink(manifest_path):
             raise ProtectionError(
@@ -456,7 +576,7 @@ class LocalAdapter(TaskAdapter):
                 code=ErrorCode.ARTIFACT_LIMIT.value,
             )
 
-        raw_bytes = manifest_path.read_bytes()
+        raw_bytes, manifest_data = _safe_load_yaml_with_bytes(manifest_path)
         upstream_digest = hashlib.sha256(raw_bytes).hexdigest()
         upstream_artifact = Artifact(
             digest=upstream_digest,
@@ -470,7 +590,6 @@ class LocalAdapter(TaskAdapter):
             created_at=datetime.now(UTC),
         )
 
-        manifest_data = _safe_load_yaml(manifest_path)
         local_manifest = read_local_manifest(manifest_path, manifest_data=manifest_data)
         if not self.supported_source_version(local_manifest.schema_version):
             raise ValidationError(
@@ -478,6 +597,27 @@ class LocalAdapter(TaskAdapter):
                 code=ErrorCode.VALIDATION_ERROR.value,
             )
         root_dir = manifest_path.parent
+        bundle, verifier_bytes = self._assemble_bundle(
+            local_manifest=local_manifest,
+            manifest_data=manifest_data,
+            root_dir=root_dir,
+            upstream_artifact=upstream_artifact,
+        )
+        return bundle, verifier_bytes
+
+    def import_task(self, request: ImportRequest) -> ImportBundle:
+        """Import a native task from its local manifest path."""
+        bundle, _ = self.import_task_with_bytes(request)
+        return bundle
+
+    def _assemble_bundle(
+        self,
+        *,
+        local_manifest: LocalImportManifest,
+        manifest_data: Mapping[str, Any],
+        root_dir: Path,
+        upstream_artifact: Artifact,
+    ) -> tuple[ImportBundle, bytes]:
 
         # 1. Parse Contract & Requirements
         contract_path = _resolve_relative_path(root_dir, local_manifest.contract_file)
@@ -637,25 +777,7 @@ class LocalAdapter(TaskAdapter):
 
         # 3. Snapshot
         snapshot_dir = _resolve_relative_path(root_dir, local_manifest.snapshot_file)
-        if not snapshot_dir.is_dir():
-            raise ValidationError(
-                f"Snapshot directory not found or not a directory: {snapshot_dir}",
-                code=ErrorCode.VALIDATION_ERROR.value,
-            )
-
-        # Hash directory content canonically with relative POSIX paths
-        hasher = hashlib.sha256()
-        for child in sorted(snapshot_dir.rglob("*")):
-            if child.is_symlink() or os.path.islink(child):
-                raise ProtectionError(
-                    f"Symlinks are prohibited in snapshot files: {child.relative_to(snapshot_dir)}",
-                    code=ErrorCode.PROTECTION_ERROR.value,
-                )
-            if child.is_file():
-                rel_posix = child.relative_to(snapshot_dir).as_posix()
-                hasher.update((rel_posix + "\0").encode("utf-8"))
-                hasher.update(child.read_bytes())
-        snapshot_digest = hasher.hexdigest()
+        snapshot_digest = hash_snapshot_directory(snapshot_dir)
 
         snapshot = RepositorySnapshot(
             snapshot_digest=snapshot_digest,
@@ -671,7 +793,7 @@ class LocalAdapter(TaskAdapter):
 
         # 4. Verifier Manifest & Version
         verifier_path = _resolve_relative_path(root_dir, local_manifest.verifier_file)
-        verifier, verifier_manifest = load_local_verifier(
+        verifier, verifier_manifest, verifier_bytes = load_local_verifier_with_bytes(
             verifier_path,
             default_verifier_id=f"{local_manifest.task.task_id}-v1",
             compatible_contract_hashes=(chash,),
@@ -741,4 +863,4 @@ class LocalAdapter(TaskAdapter):
             diagnostics=(),
         )
         self.validate_environment(bundle)
-        return bundle
+        return bundle, verifier_bytes

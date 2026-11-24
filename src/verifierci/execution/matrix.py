@@ -50,6 +50,7 @@ def aggregate_cell(
     attempts: Sequence[EvaluationAttempt],
     job_repetition_map: Mapping[str, int] | None = None,
     selected_attempt_by_job: Mapping[str, str] | None = None,
+    terminal_failed_rep_reasons: Mapping[int, str | None] | None = None,
 ) -> AcceptanceCell:
     """Aggregate all repetitions for a (task, case, verifier) cell per SDD Section 8.4."""
     if planned_repetitions < 1:
@@ -67,10 +68,15 @@ def aggregate_cell(
             )
         seen_attempt_ids.add(att.attempt_id)
 
-    # Group attempts by repetition
+    # Group attempts and planned jobs by repetition
     repetition_to_attempts: dict[int, list[EvaluationAttempt]] = {
         r: [] for r in range(planned_repetitions)
     }
+    rep_to_job_ids: dict[int, list[str]] = {r: [] for r in range(planned_repetitions)}
+    if job_repetition_map:
+        for jid, rep_idx in job_repetition_map.items():
+            if 0 <= rep_idx < planned_repetitions:
+                rep_to_job_ids[rep_idx].append(jid)
 
     selected_attempt_ids: list[str] = []
     excluded_attempt_ids: list[str] = []
@@ -93,12 +99,26 @@ def aggregate_cell(
 
         selected: EvaluationAttempt | None = None
         if selected_attempt_by_job:
-            fenced = [
-                a
-                for a in rep_attempts
-                if selected_attempt_by_job.get(a.job_id) == a.attempt_id
+            expected_selected_ids = [
+                selected_attempt_by_job[jid]
+                for jid in rep_to_job_ids.get(r, ())
+                if jid in selected_attempt_by_job
             ]
-            if fenced:
+            if not expected_selected_ids:
+                # Handle aggregate_cell calls without explicit job_repetition_map back-entries
+                expected_selected_ids = [
+                    selected_attempt_by_job[a.job_id]
+                    for a in rep_attempts
+                    if a.job_id in selected_attempt_by_job
+                ]
+            if expected_selected_ids:
+                target_id = expected_selected_ids[0]
+                fenced = [a for a in rep_attempts if a.attempt_id == target_id]
+                if not fenced:
+                    raise IdentityConflict(
+                        f"Selected attempt '{target_id}' is missing from repetition {r} attempts.",
+                        code=ErrorCode.IDENTITY_CONFLICT.value,
+                    )
                 selected = fenced[0]
                 if selected.disposition != "authoritative":
                     raise IdentityConflict(
@@ -136,6 +156,15 @@ def aggregate_cell(
             for a in rep_attempts:
                 if a.attempt_id != selected.attempt_id:
                     excluded_attempt_ids.append(a.attempt_id)
+        elif (
+            terminal_failed_rep_reasons is not None and r in terminal_failed_rep_reasons
+        ):
+            # Exhausted retries or cancelled job with only abandoned/stale attempts
+            for a in rep_attempts:
+                excluded_attempt_ids.append(a.attempt_id)
+            repetition_outcomes.append("error")
+            reason = terminal_failed_rep_reasons[r] or "INFRASTRUCTURE_ERROR"
+            diagnostic_codes.append(reason)
         else:
             # No authoritative terminal selection yet; exclude stale/abandoned retries
             for a in rep_attempts:
@@ -208,7 +237,7 @@ def aggregate_cell(
         evaluation_validity=validity,
         planned_repetitions=planned_repetitions,
         selected_attempt_ids=tuple(selected_attempt_ids),
-        excluded_attempt_ids=tuple(excluded_attempt_ids),
+        excluded_attempt_ids=tuple(sorted(excluded_attempt_ids)),
         repetition_outcomes=tuple(repetition_outcomes),
         diagnostic_codes=tuple(deduped_codes),
     )
@@ -323,6 +352,11 @@ def build_matrix(
                 raise IdentityConflict(
                     f"Job '{j.job_id}' has multiple authoritative attempts while fenced to '{sel_att.attempt_id}'."
                 )
+            if sel_att.fence != j.fence:
+                raise IdentityConflict(
+                    f"Job '{j.job_id}' selected attempt '{sel_att.attempt_id}' has fence {sel_att.fence}, "
+                    f"expected job fence {j.fence}."
+                )
             selected_attempt_by_job[j.job_id] = j.selected_attempt_id
 
     # Collect planned cells from manifest pins (when case_ids are explicit) and jobs
@@ -379,7 +413,23 @@ def build_matrix(
         label = adj.label if adj else "unresolved"
         repo_id = repository_map.get(t_key, "") if repository_map else ""
 
+        cell_jobs = [
+            j
+            for j in jobs
+            if (j.task_key, j.case_id, j.verifier_key) == (t_key, c_id, v_key)
+        ]
+        job_repetition_map = {j.job_id: j.repetition for j in cell_jobs}
+        failed_rep_reasons: dict[int, str | None] = {}
+        for j in cell_jobs:
+            if j.state == "FAILED" and j.selected_attempt_id is None:
+                job_atts = attempts_by_job.get(j.job_id, ())
+                has_authoritative = any(
+                    a.disposition == "authoritative" for a in job_atts
+                )
+                if not has_authoritative:
+                    failed_rep_reasons[j.repetition] = j.terminal_reason
         cell_attempts = attempts_by_cell.get((t_key, c_id, v_key), [])
+
         cell = aggregate_cell(
             task_key=t_key,
             repository_id=repo_id,
@@ -392,17 +442,28 @@ def build_matrix(
             attempts=cell_attempts,
             job_repetition_map=job_repetition_map,
             selected_attempt_by_job=selected_attempt_by_job,
+            terminal_failed_rep_reasons=failed_rep_reasons,
         )
         cells.append(cell)
 
     non_terminal_jobs = [j for j in jobs if j.state not in _TERMINAL_JOB_STATES]
     missing_planned_coords = planned_job_coords - seen_job_coords
+    extra_planned_coords = (
+        seen_job_coords - planned_job_coords if planned_job_coords else set()
+    )
+    if extra_planned_coords:
+        raise ValidationError(
+            f"Cannot finalize acceptance matrix: {len(extra_planned_coords)} job(s) "
+            "reference unplanned task/case/verifier/repetition coordinates.",
+            code=ErrorCode.VALIDATION_ERROR.value,
+        )
 
     is_complete = (
         len(jobs) > 0
         and not non_terminal_jobs
         and not missing_planned_coords
-        and all(len(c.selected_attempt_ids) == manifest.max_repetitions for c in cells)
+        and all("pending" not in c.repetition_outcomes for c in cells)
+        and all(len(c.repetition_outcomes) == manifest.max_repetitions for c in cells)
         and all("INCOMPLETE_REPETITIONS" not in c.diagnostic_codes for c in cells)
     )
 

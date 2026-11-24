@@ -51,7 +51,13 @@ def _sanitize_storage_uri(uri: str) -> str:
     if not uri:
         return uri
     parsed = urlsplit(uri)
-    if not parsed.scheme and "@" not in parsed.path:
+    if (
+        not parsed.scheme
+        and not parsed.netloc
+        and not parsed.query
+        and not parsed.fragment
+        and "@" not in parsed.path
+    ):
         return uri
 
     netloc = parsed.netloc
