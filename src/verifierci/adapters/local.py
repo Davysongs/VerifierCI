@@ -427,7 +427,7 @@ class LocalAdapter(TaskAdapter):
             for entry in entries:
                 if not isinstance(entry, Mapping):
                     raise ValidationError(
-                        f"Requirement file {rf_str} entries must be mappings",
+                        "Each requirement entry must be a mapping",
                         code=ErrorCode.VALIDATION_ERROR.value,
                     )
                 # Preserve explicit source_locator, default to rf_str for external entries

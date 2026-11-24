@@ -11,6 +11,7 @@ import dataclasses
 import hashlib
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -405,11 +406,9 @@ def test_build_manifest_max_jobs_capping() -> None:
     assert exc.value.code == ErrorCode.RESOURCE_EXHAUSTED.value
 
 
-def test_plan_audit_end_to_end() -> None:
-    pin1 = _make_pin(task_key="task-a@1.0", case_ids=("c1", "c2"))
-    pin2 = _make_pin(task_key="task-b@1.0", case_ids=("c3",))
-
-    options = AuditOptions(
+@pytest.fixture
+def audit_options() -> AuditOptions:
+    return AuditOptions(
         task_files=("task1.yaml", "task2.yaml"),
         benchmark_file=None,
         panel_file="panel.yaml",
@@ -435,7 +434,12 @@ def test_plan_audit_end_to_end() -> None:
         diagnostic=False,
     )
 
-    manifest, jobs = plan_audit(options=options, task_pins=(pin1, pin2))
+
+def test_plan_audit_end_to_end(audit_options: AuditOptions) -> None:
+    pin1 = _make_pin(task_key="task-a@1.0", case_ids=("c1", "c2"))
+    pin2 = _make_pin(task_key="task-b@1.0", case_ids=("c3",))
+
+    manifest, jobs = plan_audit(options=audit_options, task_pins=(pin1, pin2))
 
     assert isinstance(manifest, AuditManifest)
     assert isinstance(jobs, tuple)
@@ -455,6 +459,47 @@ def test_plan_audit_end_to_end() -> None:
     assert len(job_ids) == len(jobs)
     assert all(j.state == "PENDING" for j in jobs)
     assert all(j.run_id == manifest.run_id for j in jobs)
+
+
+def test_plan_audit_resume_preserves_plan_identity(
+    audit_options: AuditOptions, tmp_path: Path
+) -> None:
+    policy_file = tmp_path / "policy.yaml"
+    policy_file.write_bytes(b"policy: first\n")
+    options = dataclasses.replace(
+        audit_options, resume_run_id="existing-run", policy_file=str(policy_file)
+    )
+    pins = (_make_pin(case_ids=("case-1",)),)
+    timestamp = datetime(2026, 1, 1)  # noqa: DTZ001
+
+    first, first_jobs = plan_audit(options, pins, timestamp=timestamp)
+    second, second_jobs = plan_audit(
+        options, pins, timestamp=timestamp.replace(tzinfo=UTC)
+    )
+
+    assert first.run_id == second.run_id == "existing-run"
+    assert first.timestamp == second.timestamp == timestamp.replace(tzinfo=UTC)
+    assert first.policy_hash == hashlib.sha256(b"policy: first\n").hexdigest()
+    assert first.manifest_hash == second.manifest_hash
+    assert first.expansion_digest == second.expansion_digest
+    assert [job.job_id for job in first_jobs] == [job.job_id for job in second_jobs]
+    assert all(job.run_id == "existing-run" for job in second_jobs)
+
+
+def test_plan_audit_applies_strictest_job_limit_after_deduplication(
+    audit_options: AuditOptions,
+) -> None:
+    pins = (_make_pin(case_ids=("case-1", "case-1"), baseline="v1", candidate="v1"),)
+    options = dataclasses.replace(audit_options, repetitions=2, max_jobs=2)
+
+    _, jobs = plan_audit(options, pins, max_jobs=10)
+    assert len(jobs) == 2
+    with pytest.raises(ValidationError) as exc:
+        plan_audit(options, pins, max_jobs=1)
+    assert exc.value.code == ErrorCode.RESOURCE_EXHAUSTED.value
+    with pytest.raises(ValidationError) as exc:
+        plan_audit(dataclasses.replace(options, max_jobs=1), pins, max_jobs=10)
+    assert exc.value.code == ErrorCode.RESOURCE_EXHAUSTED.value
 
 
 def test_plan_jobs_backward_compat() -> None:

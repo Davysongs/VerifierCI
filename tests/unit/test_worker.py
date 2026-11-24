@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import patch
 
@@ -148,7 +149,12 @@ def setup_env(tmp_path: Path) -> tuple[Database, Path, Path]:
     return db, snap_dir, root
 
 
-def test_worker_run_one_success(setup_env: tuple[Database, Path, Path]) -> None:
+@pytest.mark.parametrize(
+    "now_ms", [None, 10_000], ids=["injected-clock", "explicit-time"]
+)
+def test_worker_run_one_success(
+    setup_env: tuple[Database, Path, Path], now_ms: int | None
+) -> None:
     db, snap_dir, root = setup_env
     conn = db.connection
 
@@ -186,14 +192,17 @@ def test_worker_run_one_success(setup_env: tuple[Database, Path, Path]) -> None:
         timeout_seconds=30,
     )
 
+    effective_clock = 100_000 if now_ms is None else now_ms
     worker = Worker(
         work_dir=root / "work",
         snapshot_resolver={"task1@1.0": snap_dir},
         diff_resolver={"case1": b""},
         manifest_resolver={"verifier@1.0": manifest},
+        clock=lambda: effective_clock,
+        heartbeat_interval_seconds=3600,
     )
 
-    executed = worker.run_one(conn, run_id="run1")
+    executed = worker.run_one(conn, run_id="run1", now_ms=now_ms)
     assert executed is True
 
     # Check job state in db
@@ -212,6 +221,13 @@ def test_worker_run_one_success(setup_env: tuple[Database, Path, Path]) -> None:
     assert att["evaluation_validity"] == "valid"
     assert att["disposition"] == "authoritative"
     assert att["tests_passed"] == 1
+    run = conn.execute(
+        "SELECT finished_at FROM audit_runs WHERE run_id = 'run1'"
+    ).fetchone()
+    expected_ms = 100_000 if now_ms is None else now_ms
+    assert datetime.fromisoformat(run["finished_at"]) == datetime.fromtimestamp(
+        expected_ms / 1000, UTC
+    )
 
     # Empty queue returns False
     assert worker.run_one(conn, run_id="run1") is False

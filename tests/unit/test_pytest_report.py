@@ -11,7 +11,10 @@ Tests compatibility-mode report evaluator:
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from typing import Any
+
+import pytest
 
 from verifierci.errors import ErrorCode
 from verifierci.evaluators.pytest_report import PytestReportParser
@@ -276,3 +279,59 @@ def test_duration_parsing() -> None:
     outcome3 = parser.parse(json.dumps(data3).encode("utf-8"), manifest, capture)
     assert outcome3.report is not None
     assert outcome3.report.results[0].duration is None
+
+
+@pytest.mark.parametrize(
+    ("report_bytes", "expected_outcome", "expected_error"),
+    [
+        (None, "invalid_evaluation", ErrorCode.EMPTY_COLLECTION.value),
+        (b"{", "invalid_evaluation", ErrorCode.PARSER_ERROR.value),
+        (b'{"tests": []}', "invalid_evaluation", ErrorCode.EMPTY_COLLECTION.value),
+        (
+            b'{"tests": [{"nodeid": "unexpected", "outcome": "passed"}]}',
+            "invalid_evaluation",
+            ErrorCode.COLLECTION_MISMATCH.value,
+        ),
+        (
+            b'{"tests": [{"nodeid": "tests/test_app.py::test_one", "outcome": "passed"}]}',
+            "accept",
+            None,
+        ),
+    ],
+    ids=["missing", "malformed", "empty-collection", "collection-mismatch", "passed"],
+)
+def test_report_parser_retains_available_evidence(
+    report_bytes: bytes | None, expected_outcome: str, expected_error: str | None
+) -> None:
+    capture = replace(
+        _make_capture(),
+        stdout_hash="a" * 64,
+        report_digest="b" * 64 if report_bytes is not None else None,
+    )
+
+    result = PytestReportParser().parse(report_bytes, _make_manifest(), capture)
+
+    assert result.outcome == expected_outcome
+    assert result.error_code == expected_error
+    expected_digests = ("a" * 64,) if report_bytes is None else ("a" * 64, "b" * 64)
+    assert result.evidence_digests == expected_digests
+
+
+def test_duplicate_node_ids_are_invalid_without_collection_constraints() -> None:
+    manifest = _make_manifest(expected_collection=(), required_pass_ids=())
+    report = {
+        "tests": [
+            {"nodeid": "test_example.py::test_one", "outcome": "passed"},
+            {"nodeid": "test_example.py::test_two", "outcome": "passed"},
+            {"nodeid": "test_example.py::test_one", "outcome": "passed"},
+        ]
+    }
+    capture = replace(_make_capture(), report_digest="c" * 64)
+
+    outcome = PytestReportParser().parse(json.dumps(report).encode(), manifest, capture)
+
+    assert outcome.outcome == "invalid_evaluation"
+    assert outcome.evaluation_validity == "invalid"
+    assert outcome.error_code == ErrorCode.PARSER_ERROR.value
+    assert outcome.report is None
+    assert outcome.evidence_digests == ("c" * 64,)
