@@ -648,3 +648,31 @@ def test_collect_output_files_symlinked_out_dir() -> None:
 
         collected = collect_output_files(symlink_out, allowed_filenames=("*",))
         assert collected == {}
+
+
+def test_collect_output_files_honors_allowlist_and_exact_aggregate_limit(
+    tmp_path: Path,
+) -> None:
+    out = tmp_path / "out"
+    reports = out / "reports"
+    reports.mkdir(parents=True)
+    hidden = reports / ".cache"
+    hidden.mkdir()
+    (hidden / "debug.json").write_bytes(b"1")
+    (reports / "a-oversized.json").write_bytes(b"12345")
+    first = reports / "b.json"
+    first.write_bytes(b"1234")
+    second = reports / "c.json"
+    second.write_bytes(b"56")
+    (reports / "d.json").write_bytes(b"7")
+    (reports / "a-notes.txt").write_bytes(b"8")
+    (out / "other.json").write_bytes(b"9")
+
+    collected = collect_output_files(
+        out,
+        allowed_filenames=("reports/*.json",),
+        max_bytes_per_file=4,
+        max_aggregate_bytes=6,
+    )
+
+    assert collected == {"reports/b.json": first, "reports/c.json": second}

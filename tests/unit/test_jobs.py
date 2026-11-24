@@ -642,28 +642,31 @@ def test_complete_worker_or_attempt_mismatch_stale(db: Database) -> None:
     assert row_stale["disposition"] == "stale"
 
 
-@pytest.mark.parametrize("reaped", [False, True])
+@pytest.mark.parametrize("lease_state", ["expired", "reaped", "live"])
 def test_complete_records_stale_quarantined_evidence(
-    db: Database, reaped: bool
+    db: Database, lease_state: str
 ) -> None:
     conn = db.connection
     now_ms = 1_000_000
     job = claim(conn, worker_id="w1", now_ms=now_ms)
     assert job is not None
 
-    if reaped:
+    if lease_state == "reaped":
         reap_expired(conn, now_ms=now_ms + 35_000)
+    elif lease_state == "live":
+        job = mark_running(conn, job, now_ms=now_ms)
 
+    complete_ms = now_ms + (1_000 if lease_state == "live" else 40_000)
     att = EvaluationAttempt(
         attempt_id=job.attempt_id,  # type: ignore[arg-type]
         job_id=job.job_id,
         fence=job.fence,
-        outcome="accept",
-        evaluation_validity="valid",
+        outcome=None if lease_state == "live" else "accept",
+        evaluation_validity="invalid" if lease_state == "live" else "valid",
         error_code=None,
-        disposition="authoritative",
+        disposition="stale" if lease_state == "live" else "authoritative",
         started_at=datetime.fromtimestamp(now_ms / 1000.0, UTC),
-        finished_at=datetime.fromtimestamp((now_ms + 40_000) / 1000.0, UTC),
+        finished_at=datetime.fromtimestamp(complete_ms / 1000.0, UTC),
         exit_code=0,
         stdout_hash="out1",
         stderr_hash="err1",
@@ -676,8 +679,12 @@ def test_complete_records_stale_quarantined_evidence(
         capture_truncated=False,
     )
 
-    # Complete after lease expired -> stale
-    assert complete(conn, job, att, now_ms=now_ms + 40_000) == "stale"
+    assert complete(conn, job, att, now_ms=complete_ms) == "stale"
+    if lease_state == "live":
+        persisted_job = get_job(conn, job.job_id)
+        assert persisted_job is not None
+        assert persisted_job.state == "RUNNING"
+        assert persisted_job.selected_attempt_id is None
 
     # Verify attempt in DB contains quarantined stale evidence
     row = conn.execute(

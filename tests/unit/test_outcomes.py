@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from verifierci.errors import ErrorCode
 from verifierci.execution.outcomes import parse_capture
 from verifierci.models.protocol import ExecutionCapture, ResourceUsage
@@ -343,3 +345,28 @@ def test_empty_collection_is_invalid_evaluation() -> None:
     assert outcome.outcome == "invalid_evaluation"
     assert outcome.evaluation_validity == "invalid"
     assert outcome.error_code == ErrorCode.EMPTY_COLLECTION.value
+
+
+@pytest.mark.parametrize(
+    "runtime_error",
+    [
+        ErrorCode.BUILD_ERROR,
+        ErrorCode.CANCELLED,
+        ErrorCode.TIMEOUT,
+        ErrorCode.RESOURCE_EXHAUSTED,
+        ErrorCode.ARTIFACT_LIMIT,
+    ],
+)
+def test_runtime_diagnostics_preserve_typed_invalid_outcome(
+    runtime_error: ErrorCode,
+) -> None:
+    capture = _make_capture(runtime_error=runtime_error.value, stderr_hash=None)
+    report = {"tests": [{"nodeid": "tests/test.py::test_pass", "outcome": "passed"}]}
+
+    result = parse_capture(capture, _make_manifest(), json.dumps(report).encode())
+
+    assert result.outcome == "invalid_evaluation"
+    assert result.evaluation_validity == "invalid"
+    assert result.error_code == runtime_error.value
+    assert result.report is None
+    assert result.evidence_digests == ("out_hash_1", "rep_hash_1")

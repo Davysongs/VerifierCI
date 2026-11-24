@@ -554,7 +554,22 @@ def test_read_manifest_unsupported_schema_version() -> None:
         assert "Unsupported local manifest schema version" in str(exc.value)
 
 
-def test_import_task_modular_requirement_files() -> None:
+@pytest.mark.parametrize(
+    ("extra_requirements", "error_message"),
+    [
+        (
+            "- requirement_id: REQ-2\n  text: Must be fast\n"
+            "- requirement_id: REQ-3\n  text: Must be reliable\n",
+            None,
+        ),
+        ("not a requirement", "must be a mapping or list"),
+        ("- not a requirement", "Each requirement entry must be a mapping"),
+    ],
+    ids=["list-root", "scalar-root", "scalar-list-item"],
+)
+def test_import_task_modular_requirement_files(
+    extra_requirements: str, error_message: str | None
+) -> None:
     adapter = LocalAdapter()
     with tempfile.TemporaryDirectory() as tmpdir:
         td = Path(tmpdir)
@@ -564,9 +579,7 @@ def test_import_task_modular_requirement_files() -> None:
         (reqs_dir / "r1.yaml").write_text(
             "requirement_id: REQ-1\ntext: Must succeed\nsource_kind: explicit\n"
         )
-        (reqs_dir / "r2.yaml").write_text(
-            "requirement_id: REQ-2\ntext: Must be fast\nsource_kind: explicit\n"
-        )
+        (reqs_dir / "r2.yaml").write_text(extra_requirements)
         (td / "contract.yaml").write_text(
             "requirements:\n"
             "  - requirement_id: REQ-0\n    text: Base req\n"
@@ -585,6 +598,7 @@ def test_import_task_modular_requirement_files() -> None:
             "contract: contract.yaml\n"
             "snapshot: source/\n"
             "verifier: v1.yaml\n"
+            "requirement_files: [requirements/r1.yaml]\n"
         )
 
         req = ImportRequest(
@@ -596,7 +610,16 @@ def test_import_task_modular_requirement_files() -> None:
             output_dir=str(td / "out"),
             dry_run=True,
         )
+        if error_message is not None:
+            with pytest.raises(ValidationError, match=error_message) as exc:
+                adapter.import_task(req)
+            assert exc.value.code == ErrorCode.VALIDATION_ERROR.value
+            return
+
         bundle = adapter.import_task(req)
-        assert len(bundle.requirements) == 3
-        req_ids = [r.requirement_id for r in bundle.requirements]
-        assert req_ids == ["REQ-0", "REQ-1", "REQ-2"]
+        assert [r.requirement_id for r in bundle.requirements] == [
+            "REQ-0",
+            "REQ-1",
+            "REQ-2",
+            "REQ-3",
+        ]
