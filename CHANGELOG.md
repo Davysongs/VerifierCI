@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased (Phase 1 — In Progress)
+## Unreleased (Phase 1 Complete)
 
 ### Added
 - Immutable typed domain models (`models/task.py`, `models/panel.py`, `models/verifier.py`, `models/result.py`, `models/protocol.py`), canonical JSON hashing (`canonical_bytes`), and typed error hierarchy (`errors.py`) with 0/1/2/3 CLI exit mapping.
@@ -13,6 +13,7 @@
 - Atomic static JSON report renderer (`reports/render.py`) serializing `AuditResult` envelopes with credential-sanitized artifact URIs (`fsync` + atomic rename) and matching JSON schema (`schemas/audit-result.schema.json`).
 - Panel validation registry (`panels/registry.py`) supporting schema, split, lineage, review-status, and artifact verification.
 - Click CLI entrypoint (`cli.py`) and orchestration service (`execution/service.py`) providing `--db`, `--artifact-dir`, `--config`, `--json`, `task import`, `panel validate`, `audit` group, and strict 0/1/2/3 exit code mapping.
+- Canonical synthetic/provisional `retry-contract` fixture (`examples/retry-contract/` source, patches, counterexample witnesses, `v1`/`v2` runners), updated `datasets/sample-panels/sample-five-case.jsonl` & `datasets/manifests/retry-contract-snapshot-v1.json`, `SnapshotRegistry` trusted fixture digest verification (`snapshots/registry.py`), and end-to-end 30-job vertical slice verification (`tests/e2e/test_phase1_vertical_slice.py`).
 
 ## 0.1.0 - 2026-09-09
 

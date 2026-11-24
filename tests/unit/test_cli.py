@@ -353,10 +353,42 @@ def test_cli_panel_validate_modes(tmp_path: Path) -> None:
     assert res_ind.exit_code == 2
     assert ErrorCode.VALIDATION_ERROR.value in res_ind.stderr
 
-    # Missing referenced artifacts with --verify-artifacts -> exit 3 (InfrastructureError)
-    res_art = runner.invoke(
+    # Installed canonical fixture has complete referenced artifacts -> exit 0
+    res_retry_art = runner.invoke(
         cli,
         ["panel", "validate", str(RETRY_PANEL), "--verify-artifacts"],
+    )
+    assert res_retry_art.exit_code == 0, res_retry_art.stderr
+
+    # Missing referenced artifacts with --verify-artifacts -> exit 3 (InfrastructureError)
+    missing_art_panel = tmp_path / "missing_art.jsonl"
+    missing_art_panel.write_text(
+        json.dumps(
+            {
+                "panel_id": "missing-art",
+                "version": "1.0.0",
+                "split": "development",
+                "cases": [
+                    {
+                        "case_id": "c1",
+                        "role": "challenge",
+                        "source": "human",
+                        "diff": "patches/does_not_exist.patch",
+                        "family_id": "f1",
+                        "adjudication": {
+                            "label": "valid",
+                            "review_status": "independent",
+                            "rationale": "ok",
+                        },
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    res_art = runner.invoke(
+        cli,
+        ["panel", "validate", str(missing_art_panel), "--verify-artifacts"],
     )
     assert res_art.exit_code == 3
     assert ErrorCode.INFRASTRUCTURE_ERROR.value in res_art.stderr

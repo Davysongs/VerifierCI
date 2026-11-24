@@ -41,6 +41,7 @@ from verifierci.models.task import canonical_repr
 from verifierci.models.verifier import VerifierManifest
 from verifierci.panels.registry import PanelValidationResult, load_and_validate_panel
 from verifierci.reports.render import render_json, render_summary
+from verifierci.snapshots.registry import SnapshotRegistry
 from verifierci.storage.artifacts import ArtifactStore, register_artifact
 from verifierci.storage.db import connect, migrate, transaction
 
@@ -648,6 +649,26 @@ def execute_audit_pipeline(
         task_key=primary_bundle.task.task_key,
         contract_hash=primary_bundle.contract.contract_hash,
         base_snapshot_digest=primary_bundle.snapshot.snapshot_digest,
+        verify_artifacts=not options.dry_run,
+    )
+
+    registry = SnapshotRegistry.from_manifests_dir()
+    fixture_diagnostics = registry.verify_fixture(
+        task_key=primary_bundle.task.task_key,
+        contract_hash=primary_bundle.contract.contract_hash,
+        snapshot_digest=primary_bundle.snapshot.snapshot_digest,
+        panel_key=panel_res.panel.panel_key,
+        verifier_digests={
+            baseline_ver.verifier_key: (
+                baseline_manifest.payload_digest,
+                baseline_manifest.manifest_hash,
+            ),
+            candidate_ver.verifier_key: (
+                candidate_manifest.payload_digest,
+                candidate_manifest.manifest_hash,
+            ),
+        },
+        case_diff_digests={c.case_id: c.diff_digest for c in panel_res.cases},
     )
 
     has_provisional = any(
@@ -683,7 +704,7 @@ def execute_audit_pipeline(
         panel=panel_res.panel,
     )
 
-    diagnostics: list[str] = list(panel_res.findings)
+    diagnostics: list[str] = list(panel_res.findings) + fixture_diagnostics
     if options.diagnostic:
         diagnostics.append(
             "Diagnostic fixture run: provisional or synthetic scope; not a release gate pass."

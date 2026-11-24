@@ -1,0 +1,15 @@
+{
+  "schema_version": "1.0.0",
+  "kind": "CounterexampleSequence",
+  "case_id": "case-retries-permanent",
+  "requirement_id": "REQ-PERMANENT-IMMEDIATE",
+  "synthetic": true,
+  "review_status": "provisional",
+  "notes": "Synthetic witness trace: PermanentError must terminate on call 1, but candidate patch retries until budget exhaustion.",
+  "trace": [
+    {"call_index": 1, "outcome": "raise PermanentError('fatal')", "expected_action": "abort_immediately", "observed_action": "scheduled_retry"},
+    {"call_index": 2, "outcome": "raise PermanentError('fatal')", "expected_action": "not_executed", "observed_action": "spurious_retry"}
+  ],
+  "expected_max_calls": 1,
+  "observed_calls": 4
+}

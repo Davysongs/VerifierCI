@@ -13,7 +13,7 @@ verifier_id: retry-contract-v2
 version: "1.0.0"
 mode: compatibility
 parent_verifier: retry-contract-v1@1.0.0
-command: ["python", "-m", "pytest", "tests/", "--json-report", "--json-report-file=/out/report.json", "-q"]
+command: ["python3", "tests/run_v2.py", "{out}"]
 build_command: []
 parser_id: pytest-report-v1
 report_path: "report.json"
@@ -24,6 +24,7 @@ expected_collection:
   - "tests/test_retry.py::test_three_transients_then_success"
   - "tests/test_retry.py::test_four_transients_exhausted"
   - "tests/test_retry.py::test_immediate_success"
+  - "tests/test_retry.py::test_private_helper_symbol"
 required_pass_ids:
   - "tests/test_retry.py::test_permanent_failure_no_retry"
   - "tests/test_retry.py::test_permanent_failure_call_count"
@@ -31,6 +32,7 @@ required_pass_ids:
   - "tests/test_retry.py::test_three_transients_then_success"
   - "tests/test_retry.py::test_four_transients_exhausted"
   - "tests/test_retry.py::test_immediate_success"
+  - "tests/test_retry.py::test_private_helper_symbol"
 permitted_skips: []
 allowed_edit_paths:
   - "src/"

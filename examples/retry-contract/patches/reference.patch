@@ -1,0 +1,31 @@
+diff --git a/src/retry.py b/src/retry.py
+--- a/src/retry.py
++++ b/src/retry.py
+@@ -24,21 +24,22 @@
+ 
+ 
+ def _execute_with_retry(fn: Callable[[], T], max_retries: int) -> T:
+-    """Execute fn with at most max_retries retries on TransientError."""
++    """Execute fn with an explicit max_retries bound on TransientError."""
+     if max_retries < 0:
+         raise ValueError("max_retries must be non-negative")
+ 
+-    for attempt in range(max_retries + 1):
++    remaining = max_retries
++    while True:
+         try:
+             return fn()
+         except PermanentError:
+             raise
+         except TransientError:
+-            if attempt >= max_retries:
++            if remaining <= 0:
+                 raise
+-    raise AssertionError("unreachable")
++            remaining -= 1
+ 
+ 
+ def retry(fn: Callable[[], T], max_retries: int = 3) -> T:
+-    """Invoke fn() with bounded retries for transient errors."""
++    """Reference solution invoking private helper _execute_with_retry."""
+     return _execute_with_retry(fn, max_retries=max_retries)
