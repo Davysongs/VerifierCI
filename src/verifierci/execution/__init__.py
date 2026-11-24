@@ -12,7 +12,14 @@ from .jobs import (
 )
 from .matrix import AcceptanceMatrixBuilder, aggregate_cell, build_matrix
 from .outcomes import parse_capture
-from .planner import build_manifest, compute_expansion_digest, expand, job_id, plan_jobs
+from .planner import (
+    build_manifest,
+    compute_expansion_digest,
+    expand,
+    job_id,
+    plan_audit,
+    plan_jobs,
+)
 from .sandbox import cleanup_attempt, execute, prepare_workspace, validate_patch
 from .worker import Worker
 
@@ -34,6 +41,7 @@ __all__ = [
     "job_id",
     "mark_running",
     "parse_capture",
+    "plan_audit",
     "plan_jobs",
     "prepare_workspace",
     "reap_expired",
