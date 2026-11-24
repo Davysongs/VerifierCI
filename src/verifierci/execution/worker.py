@@ -412,6 +412,30 @@ class Worker:
                                 env=dict(build_spec.env),
                             )
                             build_exit_code = b_capture.exit_code
+                            if build_exit_code != 0:
+                                capture = ExecutionCapture(
+                                    attempt_id=attempt_id,
+                                    exit_code=build_exit_code,
+                                    timed_out=False,
+                                    oom_killed=False,
+                                    cancelled=False,
+                                    build_exit_code=build_exit_code,
+                                    stdout_hash=None,
+                                    stderr_hash=None,
+                                    report_digest=None,
+                                    truncated=False,
+                                    resources=ResourceUsage(
+                                        duration=0.0,
+                                        allocated_cpu=1.0,
+                                        cpu_seconds=0.0,
+                                        peak_memory=None,
+                                        model_usage=None,
+                                        estimated_cost=None,
+                                        pricing_version=None,
+                                        bytes_written=0,
+                                    ),
+                                    runtime_error=None,
+                                )
                         except (ValidationError, VerifierCIError) as build_err:
                             build_exit_code = 1
                             capture = ExecutionCapture(
@@ -441,29 +465,7 @@ class Worker:
                             )
 
                     if build_exit_code is not None and build_exit_code != 0:
-                        capture = ExecutionCapture(
-                            attempt_id=attempt_id,
-                            exit_code=build_exit_code,
-                            timed_out=False,
-                            oom_killed=False,
-                            cancelled=False,
-                            build_exit_code=build_exit_code,
-                            stdout_hash=None,
-                            stderr_hash=None,
-                            report_digest=None,
-                            truncated=False,
-                            resources=ResourceUsage(
-                                duration=0.0,
-                                allocated_cpu=1.0,
-                                cpu_seconds=0.0,
-                                peak_memory=None,
-                                model_usage=None,
-                                estimated_cost=None,
-                                pricing_version=None,
-                                bytes_written=0,
-                            ),
-                            runtime_error=None,
-                        )
+                        pass
                     elif not lease_lost.is_set():
                         try:
                             cmd_spec = resolve_command(
@@ -604,7 +606,7 @@ class Worker:
                     evidence_digests.append(art.digest)
 
             report_bytes = None
-            if manifest is not None:
+            if manifest is not None and not out_dir.is_symlink():
                 report_file = out_dir / manifest.report_path
                 # Check no intermediate parent within out_dir is a symlink
                 rep_parts = Path(manifest.report_path.replace("\\", "/")).parts
@@ -612,10 +614,18 @@ class Worker:
                     (out_dir / Path(*rep_parts[:i])).is_symlink()
                     for i in range(1, len(rep_parts))
                 )
+                try:
+                    _is_confined = report_file.resolve().is_relative_to(
+                        out_dir.resolve()
+                    )
+                except (ValueError, OSError):
+                    _is_confined = False
+
                 if (
                     report_file.is_file()
                     and not report_file.is_symlink()
                     and not _report_parent_symlinked
+                    and _is_confined
                 ):
                     max_report_bytes = 16 * 1024 * 1024
                     with report_file.open("rb") as f:

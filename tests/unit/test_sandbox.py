@@ -599,3 +599,52 @@ def test_collect_output_files_no_symlinks() -> None:
             out, allowed_filenames=("*",), max_bytes_per_file=5
         )
         assert "output.txt" not in collected_capped  # Exceeds 5 bytes
+
+
+def test_execute_out_dir_symlink_prohibited() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        source = root / "source"
+        source.mkdir()
+        out = root / "out"
+        out.mkdir()
+        capture_dir = root / "capture"
+        capture_dir.mkdir()
+        job = _make_dummy_job("att-out-symlink")
+
+        # Subprocess replaces out_dir with a symlink to /tmp
+        outside = root / "outside"
+        outside.mkdir()
+        (outside / "report.json").write_text('{"summary": "pass"}')
+
+        script = (
+            "import os, shutil, sys\n"
+            f"shutil.rmtree(r'{out}')\n"
+            f"os.symlink(r'{outside}', r'{out}')\n"
+        )
+
+        with pytest.raises(
+            ProtectionError, match="Symlink in out_dir is prohibited"
+        ) as exc:
+            execute(
+                job=job,
+                command=(sys.executable, "-c", script),
+                workspace=source,
+                out_dir=out,
+                report_path="report.json",
+            )
+        assert exc.value.code == ErrorCode.PROTECTION_ERROR.value
+
+
+def test_collect_output_files_symlinked_out_dir() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        real_dir = root / "real"
+        real_dir.mkdir()
+        (real_dir / "report.json").write_text('{"summary": "pass"}')
+
+        symlink_out = root / "out_symlink"
+        symlink_out.symlink_to(real_dir)
+
+        collected = collect_output_files(symlink_out, allowed_filenames=("*",))
+        assert collected == {}

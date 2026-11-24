@@ -21,7 +21,7 @@ from unittest.mock import patch
 import pytest
 
 from verifierci.errors import ErrorCode, LeaseLost, ValidationError
-from verifierci.execution.outcomes import ParsedOutcome
+from verifierci.execution.outcomes import ParsedOutcome, parse_capture
 from verifierci.execution.worker import Worker
 from verifierci.models.verifier import VerifierManifest
 from verifierci.storage.artifacts import ArtifactStore
@@ -426,6 +426,134 @@ def test_worker_build_command_failure(setup_env: tuple[Database, Path, Path]) ->
     ).fetchone()
     assert att["outcome"] == "invalid_evaluation"
     assert att["error_code"] == ErrorCode.BUILD_ERROR.value
+
+
+def test_worker_build_command_exception_preserves_error(
+    setup_env: tuple[Database, Path, Path],
+) -> None:
+    db, snap_dir, root = setup_env
+    conn = db.connection
+
+    conn.execute(
+        """
+        INSERT INTO jobs (job_id, run_id, task_key, case_id, verifier_key, repetition, state, fence, attempts_started)
+        VALUES ('j_bld_exc', 'run1', 'task1@1.0', 'case1', 'verifier@1.0', 0, 'PENDING', 0, 0)
+        """
+    )
+
+    # Invalid placeholder '{invalid}' will cause resolve_command to raise ValidationError
+    manifest = VerifierManifest(
+        manifest_hash="5" * 64,
+        mode="compatibility",
+        command=(sys.executable, "-c", "pass"),
+        build_command=(sys.executable, "-c", "print('{invalid}')"),
+        expected_collection=("t1",),
+        parser_id="pytest-report-v1",
+        report_path="report.json",
+        payload_digest="c" * 64,
+        allowed_edit_paths=("*",),
+        required_pass_ids=("t1",),
+        permitted_skips=(),
+        timeout_seconds=30,
+    )
+
+    worker = Worker(
+        work_dir=root / "work_bld_exc",
+        snapshot_resolver={"task1@1.0": snap_dir},
+        diff_resolver={"case1": b""},
+        manifest_resolver={"verifier@1.0": manifest},
+    )
+
+    with patch(
+        "verifierci.execution.worker.parse_capture", wraps=parse_capture
+    ) as mock_parse:
+        executed = worker.run_one(conn, run_id="run1")
+        assert executed is True
+
+        # Assert exception-path capture is preserved and reaches parse_capture
+        assert mock_parse.called
+        captured = mock_parse.call_args[0][0]
+        assert captured.runtime_error == ErrorCode.VALIDATION_ERROR.value
+        assert captured.build_exit_code == 1
+
+    row = conn.execute(
+        "SELECT state, selected_attempt_id FROM jobs WHERE job_id = 'j_bld_exc'"
+    ).fetchone()
+    assert row["state"] == "DONE"
+
+    att = conn.execute(
+        "SELECT * FROM evaluation_attempts WHERE attempt_id = ?",
+        (row["selected_attempt_id"],),
+    ).fetchone()
+    assert att["outcome"] == "invalid_evaluation"
+    assert att["error_code"] == ErrorCode.PATCH_ERROR.value
+
+
+def test_worker_symlinked_out_dir_does_not_reach_artifact_storage(
+    setup_env: tuple[Database, Path, Path],
+) -> None:
+    db, snap_dir, root = setup_env
+    conn = db.connection
+
+    conn.execute(
+        """
+        INSERT INTO jobs (job_id, run_id, task_key, case_id, verifier_key, repetition, state, fence, attempts_started)
+        VALUES ('j_symlink_out', 'run1', 'task1@1.0', 'case1', 'verifier@1.0', 0, 'PENDING', 0, 0)
+        """
+    )
+
+    outside = root / "outside_dir"
+    outside.mkdir()
+    (outside / "report.json").write_text(
+        '{"tests": [{"nodeid": "t1", "outcome": "passed"}]}'
+    )
+
+    # Verifier replaces {out} with symlink to outside_dir
+    script = (
+        "import os, shutil, sys\n"
+        "from pathlib import Path\n"
+        "out = Path(sys.argv[1])\n"
+        "outside = Path(sys.argv[2])\n"
+        "shutil.rmtree(out)\n"
+        "os.symlink(outside, out)\n"
+    )
+    py_script = root / "runner_symlink_out.py"
+    py_script.write_text(script)
+
+    manifest = VerifierManifest(
+        manifest_hash="6" * 64,
+        mode="compatibility",
+        command=(sys.executable, str(py_script), "{out}", str(outside)),
+        build_command=(),
+        expected_collection=("t1",),
+        parser_id="pytest-report-v1",
+        report_path="report.json",
+        payload_digest="c" * 64,
+        allowed_edit_paths=("*",),
+        required_pass_ids=("t1",),
+        permitted_skips=(),
+        timeout_seconds=30,
+    )
+
+    worker = Worker(
+        work_dir=root / "work_sym_out",
+        snapshot_resolver={"task1@1.0": snap_dir},
+        diff_resolver={"case1": b""},
+        manifest_resolver={"verifier@1.0": manifest},
+    )
+
+    executed = worker.run_one(conn, run_id="run1")
+    assert executed is True
+
+    att = conn.execute(
+        "SELECT * FROM evaluation_attempts WHERE job_id = 'j_symlink_out'"
+    ).fetchone()
+    # Attempt rejected/invalid due to ProtectionError on symlinked out_dir
+    assert att["outcome"] == "invalid_evaluation"
+    assert att["error_code"] == ErrorCode.PATCH_ERROR.value
+    # Report must not have been loaded into artifact digests
+    assert att["report_digest"] is None
+    assert att["artifact_digests"] == "[]"
 
 
 def test_worker_callable_resolvers_and_stderr(

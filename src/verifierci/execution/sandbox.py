@@ -322,6 +322,7 @@ def execute(
         )
 
     out_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    expected_out_dir = out_dir.resolve()
 
     attempt_id = job.attempt_id or "unknown"
     start_time = time.monotonic()
@@ -446,9 +447,19 @@ def execute(
             (capture_dir / "stderr.log").write_bytes(stderr_bytes)
 
     # Validate and inspect report file without following symlinks
-    if ".." in report_path.replace("\\", "/").split("/"):
+    if (
+        Path(report_path).is_absolute()
+        or report_path.startswith(("/", "\\"))
+        or ".." in report_path.replace("\\", "/").split("/")
+    ):
         raise ProtectionError(
             f"Path traversal in report_path is prohibited: {report_path}",
+            code=ErrorCode.PROTECTION_ERROR.value,
+        )
+
+    if out_dir.is_symlink():
+        raise ProtectionError(
+            f"Symlink in out_dir is prohibited: {out_dir}",
             code=ErrorCode.PROTECTION_ERROR.value,
         )
 
@@ -472,13 +483,16 @@ def execute(
     # Confirm resolved path is confined to out_dir
     try:
         resolved_rep = rep_file.resolve()
-        if not resolved_rep.is_relative_to(out_dir.resolve()):
+        if not resolved_rep.is_relative_to(expected_out_dir):
             raise ProtectionError(
                 f"report_path escapes output directory: {report_path}",
                 code=ErrorCode.PROTECTION_ERROR.value,
             )
-    except (ValueError, OSError):
-        pass
+    except (ValueError, OSError) as exc:
+        raise ProtectionError(
+            f"report_path escapes output directory: {report_path}",
+            code=ErrorCode.PROTECTION_ERROR.value,
+        ) from exc
 
     if rep_file.is_file():
         if rep_file.stat().st_size > max_capture_bytes:
@@ -534,7 +548,7 @@ def collect_output_files(
     Rejects/skips symlinks, directory traversal, hidden files, and files exceeding limits.
     Returns mapping from relative filename to Path.
     """
-    if not out_dir.is_dir():
+    if not out_dir.is_dir() or out_dir.is_symlink():
         return {}
 
     collected: dict[str, Path] = {}
