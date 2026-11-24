@@ -3,9 +3,68 @@
   "$id": "https://verifierci.dev/schemas/audit-result.schema.json",
   "title": "AuditResult",
   "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "kind", "data"],
   "properties": {
-    "task_id": {"type": "string"},
-    "status": {"type": "string"},
-    "verdict": {"type": "string"}
+    "schema_version": {
+      "type": "string",
+      "const": "1.0.0"
+    },
+    "kind": {
+      "type": "string",
+      "const": "AuditResult"
+    },
+    "data": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["manifest", "matrix", "metrics", "gate", "diagnostics", "artifacts"],
+      "properties": {
+        "manifest": {
+          "type": "object"
+        },
+        "matrix": {
+          "type": ["object", "null"]
+        },
+        "metrics": {
+          "type": "array",
+          "items": {"type": "object"}
+        },
+        "gate": {
+          "type": ["object", "null"]
+        },
+        "diagnostics": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "artifacts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "digest",
+              "kind",
+              "size_bytes",
+              "storage_uri",
+              "media_type",
+              "access_policy",
+              "retention_until",
+              "available",
+              "created_at"
+            ],
+            "properties": {
+              "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "kind": {"type": "string"},
+              "size_bytes": {"type": "integer", "minimum": 0},
+              "storage_uri": {"type": "string"},
+              "media_type": {"type": "string"},
+              "access_policy": {"type": "string", "enum": ["public", "restricted", "sealed"]},
+              "retention_until": {"type": ["string", "null"]},
+              "available": {"type": "boolean"},
+              "created_at": {"type": "string"}
+            }
+          }
+        }
+      }
+    }
   }
 }

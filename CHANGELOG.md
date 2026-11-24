@@ -10,6 +10,7 @@
 - Deterministic audit planner and job expander (`execution/planner.py`) with policy timeout capping and job-count ceilings.
 - Isolated attempt workspace preparation and subprocess supervisor (`execution/sandbox.py`), single-attempt lease-fenced `Worker` (`execution/worker.py`), normative classification precedence (`execution/outcomes.py`), and `PytestReportParser` (`evaluators/pytest_report.py`).
 - Phase 1 acceptance matrix reducer (`execution/matrix.py`) with fence-selected authoritative attempts, SDD §8.4 repetition aggregation, and refusal of matrix finalization when planned jobs remain pending.
+- Atomic static JSON report renderer (`reports/render.py`) serializing `AuditResult` envelopes with credential-sanitized artifact URIs (`fsync` + atomic rename) and matching JSON schema (`schemas/audit-result.schema.json`).
 
 ## 0.1.0 - 2026-09-09
 
