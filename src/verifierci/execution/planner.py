@@ -10,12 +10,24 @@ import hashlib
 import uuid
 from collections.abc import Sequence
 from datetime import UTC, datetime
+from pathlib import Path
 
 from verifierci.errors import ErrorCode, ValidationError
 from verifierci.models.panel import PatchPanel
 from verifierci.models.protocol import AuditOptions, Job, SandboxPolicy, TaskPin
 from verifierci.models.result import AuditManifest
 from verifierci.models.task import canonical_bytes
+
+
+def _file_or_name_hash(path_str: str) -> str:
+    """Hash the contents of path_str if it resolves to a readable file, otherwise hash the path string itself."""
+    try:
+        p = Path(path_str)
+        if p.is_file() and not p.is_symlink():
+            return hashlib.sha256(p.read_bytes()).hexdigest()
+    except OSError:
+        pass
+    return hashlib.sha256(path_str.encode("utf-8")).hexdigest()
 
 
 def job_id(
@@ -238,7 +250,7 @@ def build_manifest(
         policy_hash
         or (policy.policy_hash if policy else None)
         or (
-            hashlib.sha256(options.policy_file.encode("utf-8")).hexdigest()
+            _file_or_name_hash(options.policy_file)
             if options and options.policy_file
             else hashlib.sha256(b"default_policy").hexdigest()
         )
@@ -247,13 +259,13 @@ def build_manifest(
         resource_policy
         or (policy.policy_hash if policy else None)
         or (
-            hashlib.sha256(options.sandbox_policy_file.encode("utf-8")).hexdigest()
+            _file_or_name_hash(options.sandbox_policy_file)
             if options and options.sandbox_policy_file
             else hashlib.sha256(b"sandbox_policy").hexdigest()
         )
     )
     eff_analysis_plan_hash = analysis_plan_hash or (
-        hashlib.sha256(options.analysis_plan_file.encode("utf-8")).hexdigest()
+        _file_or_name_hash(options.analysis_plan_file)
         if options and options.analysis_plan_file
         else None
     )
@@ -289,6 +301,40 @@ def build_manifest(
         expansion_digest="temp",
         parent_run_id=eff_parent_run_id,
     )
+
+    # Check job limits before expanding (pre-compute count to fail fast)
+    pre_job_limits: list[int] = []
+    if options and options.max_jobs:
+        pre_job_limits.append(options.max_jobs)
+    if policy and policy.max_jobs:
+        pre_job_limits.append(policy.max_jobs)
+    if max_jobs is not None:
+        pre_job_limits.append(max_jobs)
+
+    if pre_job_limits:
+        pre_ceiling = min(pre_job_limits)
+        estimated_count = 0
+        for pin in sorted_pins:
+            raw_vs = {
+                v
+                for v in (pin.verifier_baseline_version, pin.verifier_candidate_version)
+                if v
+            }
+            pin_cases: Sequence[str] = pin.case_ids
+            if not pin_cases and panel is not None:
+                if hasattr(panel, "memberships"):
+                    pin_cases = tuple(m.case_id for m in panel.memberships)
+                elif hasattr(panel, "cases"):
+                    pin_cases = tuple(c.case_id for c in panel.cases)
+                elif hasattr(panel, "case_ids"):
+                    pin_cases = tuple(panel.case_ids)
+            unique_cases = len({c for c in pin_cases if c})
+            estimated_count += unique_cases * len(raw_vs) * eff_repetitions
+        if estimated_count > pre_ceiling:
+            raise ValidationError(
+                f"Planned job count ({estimated_count}) exceeds max_jobs ceiling ({pre_ceiling}).",
+                code=ErrorCode.RESOURCE_EXHAUSTED.value,
+            )
 
     planned_jobs = expand(temp_manifest, panel)
 

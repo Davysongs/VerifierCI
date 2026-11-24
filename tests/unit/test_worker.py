@@ -832,10 +832,19 @@ def test_worker_lease_lost_event_sets_stale(
         """
     )
 
+    # Use a signal file to synchronize: the runner blocks until the signal file
+    # appears, the heartbeat mock writes the signal then raises LeaseLost.
+    signal_file = root / "heartbeat_called.signal"
+
     script = (
-        "import json, sys\n"
+        "import json, sys, time\n"
         "from pathlib import Path\n"
         "out = Path(sys.argv[1])\n"
+        "signal = Path(sys.argv[2])\n"
+        "# Wait for heartbeat to fire (up to 10s)\n"
+        "deadline = time.monotonic() + 10\n"
+        "while not signal.exists() and time.monotonic() < deadline:\n"
+        "    time.sleep(0.005)\n"
         "data = {'tests': [{'nodeid': 't1', 'outcome': 'passed'}]}\n"
         "(out / 'report.json').write_text(json.dumps(data))\n"
     )
@@ -845,7 +854,7 @@ def test_worker_lease_lost_event_sets_stale(
     manifest = VerifierManifest(
         manifest_hash="3" * 64,
         mode="compatibility",
-        command=(sys.executable, str(py_script), "{out}"),
+        command=(sys.executable, str(py_script), "{out}", str(signal_file)),
         build_command=(),
         expected_collection=("t1",),
         parser_id="pytest-report-v1",
@@ -866,8 +875,13 @@ def test_worker_lease_lost_event_sets_stale(
         lease_duration_ms=1000,
     )
 
+    def _heartbeat_side_effect(*args: object, **kwargs: object) -> None:
+        # Write signal file so runner can proceed, then raise LeaseLost
+        signal_file.touch()
+        raise LeaseLost("Lease lost")
+
     with patch(
-        "verifierci.execution.jobs.heartbeat", side_effect=LeaseLost("Lease lost")
+        "verifierci.execution.jobs.heartbeat", side_effect=_heartbeat_side_effect
     ):
         executed = worker.run_one(conn, run_id="run1")
         assert executed is True

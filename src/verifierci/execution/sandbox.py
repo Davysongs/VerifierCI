@@ -64,10 +64,14 @@ def validate_patch(diff: bytes, allowed_paths: tuple[str, ...]) -> None:
         elif line.startswith(("--- ", "+++ ")):
             raw_target = line[4:].split("\t")[0].strip()
             target_files.append(raw_target)
-        elif line.startswith(("rename from ", "rename to ")):
-            target_files.append(line[12:].split("\t")[0].strip())
-        elif line.startswith(("copy from ", "copy to ")):
-            target_files.append(line[10:].split("\t")[0].strip())
+        elif line.startswith("rename from "):
+            target_files.append(line[len("rename from ") :].split("\t")[0].strip())
+        elif line.startswith("rename to "):
+            target_files.append(line[len("rename to ") :].split("\t")[0].strip())
+        elif line.startswith("copy from "):
+            target_files.append(line[len("copy from ") :].split("\t")[0].strip())
+        elif line.startswith("copy to "):
+            target_files.append(line[len("copy to ") :].split("\t")[0].strip())
         elif line.startswith("diff --git "):
             parts = line.split(" ")
             if len(parts) >= 3:
@@ -137,7 +141,13 @@ def prepare_workspace(
     All attempt directories are scaffolded with 0700 permissions.
     """
     attempt_id = job.attempt_id or str(uuid.uuid4())
-    if "/" in attempt_id or "\\" in attempt_id or ".." in attempt_id or not attempt_id:
+    if (
+        "/" in attempt_id
+        or "\\" in attempt_id
+        or ".." in attempt_id
+        or not attempt_id
+        or attempt_id == "."
+    ):
         raise ValidationError(
             f"Invalid attempt_id: {attempt_id}",
             code=ErrorCode.VALIDATION_ERROR.value,
@@ -450,6 +460,26 @@ def execute(
             code=ErrorCode.PROTECTION_ERROR.value,
         )
 
+    # Check that no intermediate parent directory component is a symlink
+    rep_parts = Path(report_path.replace("\\", "/")).parts
+    for i in range(1, len(rep_parts)):
+        intermediate = out_dir.joinpath(*rep_parts[:i])
+        if intermediate.is_symlink():
+            raise ProtectionError(
+                f"Symlink in report_path parent directory is prohibited: {report_path}",
+                code=ErrorCode.PROTECTION_ERROR.value,
+            )
+    # Confirm resolved path is confined to out_dir
+    try:
+        resolved_rep = rep_file.resolve()
+        if not resolved_rep.is_relative_to(out_dir.resolve()):
+            raise ProtectionError(
+                f"report_path escapes output directory: {report_path}",
+                code=ErrorCode.PROTECTION_ERROR.value,
+            )
+    except (ValueError, OSError):
+        pass
+
     if rep_file.is_file():
         if rep_file.stat().st_size > max_capture_bytes:
             truncated = True
@@ -533,6 +563,11 @@ def collect_output_files(
         except ValueError:
             continue
 
+        # Reject hidden files and directories (dot-prefixed path components)
+        rel_path_obj = path.relative_to(out_dir)
+        if any(part.startswith(".") for part in rel_path_obj.parts):
+            continue
+
         matched = False
         if (
             "*" in allowed_filenames
@@ -563,7 +598,13 @@ def collect_output_files(
 
 def cleanup_attempt(attempt_id: str, root: Path) -> None:
     """Remove all attempt directory state."""
-    if "/" in attempt_id or "\\" in attempt_id or ".." in attempt_id or not attempt_id:
+    if (
+        "/" in attempt_id
+        or "\\" in attempt_id
+        or ".." in attempt_id
+        or not attempt_id
+        or attempt_id == "."
+    ):
         raise ValidationError(
             f"Invalid attempt_id: {attempt_id}",
             code=ErrorCode.VALIDATION_ERROR.value,

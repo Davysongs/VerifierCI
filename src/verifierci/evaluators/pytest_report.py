@@ -43,13 +43,19 @@ class PytestReportParser:
         capture: ExecutionCapture,
     ) -> ParsedOutcome:
         """Parse raw report bytes and classify the outcome according to test results."""
+        evidence_digests: tuple[str, ...] = tuple(
+            h
+            for h in (capture.stdout_hash, capture.stderr_hash, capture.report_digest)
+            if h is not None
+        )
+
         if not report_bytes or not report_bytes.strip():
             return ParsedOutcome(
                 outcome="invalid_evaluation",
                 evaluation_validity="invalid",
                 error_code=ErrorCode.EMPTY_COLLECTION.value,
                 report=None,
-                evidence_digests=(),
+                evidence_digests=evidence_digests,
             )
 
         try:
@@ -60,7 +66,7 @@ class PytestReportParser:
                 evaluation_validity="invalid",
                 error_code=ErrorCode.PARSER_ERROR.value,
                 report=None,
-                evidence_digests=(),
+                evidence_digests=evidence_digests,
             )
 
         if not isinstance(data, dict):
@@ -69,7 +75,7 @@ class PytestReportParser:
                 evaluation_validity="invalid",
                 error_code=ErrorCode.PARSER_ERROR.value,
                 report=None,
-                evidence_digests=(),
+                evidence_digests=evidence_digests,
             )
 
         # Extract test items
@@ -80,14 +86,8 @@ class PytestReportParser:
                 evaluation_validity="invalid",
                 error_code=ErrorCode.PARSER_ERROR.value,
                 report=None,
-                evidence_digests=(),
+                evidence_digests=evidence_digests,
             )
-
-        evidence_digests: tuple[str, ...] = tuple(
-            h
-            for h in (capture.stdout_hash, capture.stderr_hash, capture.report_digest)
-            if h is not None
-        )
 
         collected_ids: list[str] = []
         test_results: list[TestResult] = []

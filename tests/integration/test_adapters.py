@@ -217,12 +217,13 @@ def test_local_adapter_oversized_files(tmp_path: Path) -> None:
 def test_local_adapter_symlink_rejections(tmp_path: Path) -> None:
     """Test that symlinks across manifests, contracts, verifiers, and snapshots are rejected."""
     adapter = LocalAdapter()
-    task_dir = tmp_path / "symlinks"
-    task_dir.mkdir()
-    task_file = _create_minimal_task_dir(task_dir)
 
     # 1. Manifest itself is a symlink
-    symlink_task = task_dir / "symlink_task.yaml"
+    task_dir1 = tmp_path / "symlinks_1"
+    task_dir1.mkdir()
+    task_file = _create_minimal_task_dir(task_dir1)
+
+    symlink_task = task_dir1 / "symlink_task.yaml"
     os.symlink(task_file, symlink_task)
     req_symlink = ImportRequest(
         adapter="local",
@@ -238,45 +239,70 @@ def test_local_adapter_symlink_rejections(tmp_path: Path) -> None:
     assert exc.value.code == ErrorCode.PROTECTION_ERROR.value
     assert "Symlink rejected" in str(exc.value)
 
-    # 2. Referenced contract is a symlink
-    req_normal = ImportRequest(
+    # 2. Referenced contract is a symlink (fresh dir)
+    task_dir2 = tmp_path / "symlinks_2"
+    task_dir2.mkdir()
+    task_file2 = _create_minimal_task_dir(task_dir2)
+    req_normal2 = ImportRequest(
         adapter="local",
         instance="test-task",
-        source=str(task_file),
+        source=str(task_file2),
         source_revision="1.0.0",
         environment_manifest=None,
         output_dir=str(tmp_path / "out"),
         dry_run=True,
     )
-    contract_file = task_dir / "contract.yaml"
-    target_contract = task_dir / "real_contract.yaml"
+    contract_file = task_dir2 / "contract.yaml"
+    target_contract = task_dir2 / "real_contract.yaml"
     contract_file.rename(target_contract)
     os.symlink(target_contract, contract_file)
 
     with pytest.raises(ProtectionError) as exc:
-        adapter.import_task(req_normal)
+        adapter.import_task(req_normal2)
     assert exc.value.code == ErrorCode.PROTECTION_ERROR.value
 
-    # 3. Referenced verifier is a symlink
-    _create_minimal_task_dir(task_dir)
-    verifier_file = task_dir / "verifier.yaml"
-    target_ver = task_dir / "real_verifier.yaml"
+    # 3. Referenced verifier is a symlink (fresh dir)
+    task_dir3 = tmp_path / "symlinks_3"
+    task_dir3.mkdir()
+    task_file3 = _create_minimal_task_dir(task_dir3)
+    req_normal3 = ImportRequest(
+        adapter="local",
+        instance="test-task",
+        source=str(task_file3),
+        source_revision="1.0.0",
+        environment_manifest=None,
+        output_dir=str(tmp_path / "out"),
+        dry_run=True,
+    )
+    verifier_file = task_dir3 / "verifier.yaml"
+    target_ver = task_dir3 / "real_verifier.yaml"
     verifier_file.rename(target_ver)
     os.symlink(target_ver, verifier_file)
 
     with pytest.raises(ProtectionError) as exc:
-        adapter.import_task(req_normal)
+        adapter.import_task(req_normal3)
     assert exc.value.code == ErrorCode.PROTECTION_ERROR.value
 
-    # 4. Referenced snapshot is a symlink
-    _create_minimal_task_dir(task_dir)
-    snap_dir = task_dir / "snapshot"
-    target_snap = task_dir / "real_snapshot"
+    # 4. Referenced snapshot is a symlink (fresh dir)
+    task_dir4 = tmp_path / "symlinks_4"
+    task_dir4.mkdir()
+    task_file4 = _create_minimal_task_dir(task_dir4)
+    req_normal4 = ImportRequest(
+        adapter="local",
+        instance="test-task",
+        source=str(task_file4),
+        source_revision="1.0.0",
+        environment_manifest=None,
+        output_dir=str(tmp_path / "out"),
+        dry_run=True,
+    )
+    snap_dir = task_dir4 / "snapshot"
+    target_snap = task_dir4 / "real_snapshot"
     snap_dir.rename(target_snap)
     os.symlink(target_snap, snap_dir)
 
     with pytest.raises(ProtectionError) as exc:
-        adapter.import_task(req_normal)
+        adapter.import_task(req_normal4)
     assert exc.value.code == ErrorCode.PROTECTION_ERROR.value
 
 

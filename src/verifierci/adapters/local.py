@@ -105,6 +105,45 @@ def _safe_load_yaml(path: Path) -> dict[str, Any]:
     return data
 
 
+def _safe_load_yaml_any(path: Path) -> Any:
+    """Load and validate a YAML file allowing mapping or list roots.
+
+    Like _safe_load_yaml but permits list-rooted files (e.g. requirement files).
+    All size, symlink, alias, and depth constraints are still enforced.
+    """
+    if path.is_symlink():
+        raise ProtectionError(
+            f"Symlink rejected in local manifest loading: {path}",
+            code=ErrorCode.PROTECTION_ERROR.value,
+        )
+    if not path.is_file():
+        raise ValidationError(
+            f"Manifest file not found: {path}",
+            code=ErrorCode.VALIDATION_ERROR.value,
+        )
+    if path.stat().st_size > MAX_MANIFEST_BYTES:
+        raise ValidationError(
+            f"Manifest size {path.stat().st_size} exceeds limit of {MAX_MANIFEST_BYTES} bytes.",
+            code=ErrorCode.ARTIFACT_LIMIT.value,
+        )
+
+    content = path.read_text(encoding="utf-8")
+    try:
+        data = yaml.load(content, Loader=RestrictedSafeLoader)
+    except yaml.YAMLError as exc:
+        raise ValidationError(
+            f"Failed to parse YAML manifest {path}: {exc}",
+            code=ErrorCode.VALIDATION_ERROR.value,
+        ) from exc
+
+    if not isinstance(data, (dict, list)):
+        raise ValidationError(
+            f"Root of requirement file {path} must be a mapping or list, got {type(data).__name__}.",
+            code=ErrorCode.VALIDATION_ERROR.value,
+        )
+    return data
+
+
 def _resolve_relative_path(root_dir: Path, rel_path_str: str) -> Path:
     """Resolve a relative path, rejecting symlinks and directory traversal."""
     if not rel_path_str:
@@ -368,7 +407,7 @@ class LocalAdapter(TaskAdapter):
 
         for rf_str in req_files_to_load:
             rf_path = _resolve_relative_path(root_dir, rf_str)
-            rf_data = _safe_load_yaml(rf_path)
+            rf_data = _safe_load_yaml_any(rf_path)
             if isinstance(rf_data, list):
                 raw_reqs.extend(rf_data)
             elif isinstance(rf_data, Mapping):
