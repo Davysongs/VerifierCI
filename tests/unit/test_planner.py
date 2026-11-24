@@ -462,3 +462,52 @@ def test_plan_jobs_backward_compat() -> None:
     assert len(jobs_list) == 2
     assert all(isinstance(j, Job) for j in jobs_list)
     assert [j.task_key for j in jobs_list] == ["task-1", "task-2"]
+
+
+def test_audit_planner_expansion_invariants() -> None:
+    """Assert deterministic job_id generation, correct job counts (tasks * cases * verifiers * repetitions), and matching expansion_digest."""
+    pin1 = _make_pin(task_key="task-A@1.0", case_ids=("case-1", "case-2", "case-3"))
+    pin2 = _make_pin(task_key="task-B@1.0", case_ids=("case-4", "case-5", "case-6"))
+    manifest = AuditManifest(
+        manifest_hash="mhash" + "0" * 59,
+        run_id="run-exp-invariants",
+        benchmark_version="v1",
+        task_pins=(pin1, pin2),
+        panel_key="panel@1.0",
+        adjudication_version="adj-v1",
+        evaluation_harness_version="harn-v1",
+        config_hash="conf1" + "0" * 59,
+        policy_hash="pol1" + "0" * 60,
+        analysis_plan_hash=None,
+        timestamp=datetime.now(UTC),
+        host_fingerprint="arm64",
+        seed=100,
+        agent_version=None,
+        model_identifier=None,
+        max_repetitions=3,
+        max_attempts_per_job=3,
+        timeout_seconds=120,
+        resource_policy="res1" + "0" * 60,
+        expansion_digest="exp1" + "0" * 60,
+        parent_run_id=None,
+    )
+
+    jobs = expand(manifest)
+    # 2 tasks * 3 cases * 2 verifiers * 3 repetitions = 36 jobs
+    expected_count = 2 * 3 * 2 * 3
+    assert len(jobs) == expected_count
+
+    # Assert deterministic job_id generation for every single job
+    for j in jobs:
+        expected_id = job_id(
+            manifest.run_id, j.task_key, j.case_id, j.verifier_key, j.repetition
+        )
+        assert j.job_id == expected_id
+
+    # Assert sorted expansion digest matches
+    digest = compute_expansion_digest(jobs)
+    assert len(digest) == 64
+    assert (
+        digest
+        == hashlib.sha256(canonical_bytes(sorted(j.job_id for j in jobs))).hexdigest()
+    )

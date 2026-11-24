@@ -303,3 +303,43 @@ def test_evidence_digests_propagation() -> None:
     }
     outcome = parse_capture(cap, manifest, json.dumps(report_data).encode("utf-8"))
     assert outcome.evidence_digests == ("h_out", "h_err", "h_rep")
+
+
+def test_patch_application_error_is_classified_as_patch_error_not_reject() -> None:
+    """SDD Section 9.1: Patch application failure is classified as PATCH_ERROR, not reject."""
+    manifest = _make_manifest()
+    cap = _make_capture(
+        exit_code=1,
+        runtime_error=ErrorCode.PATCH_ERROR.value,
+    )
+    outcome = parse_capture(cap, manifest)
+    assert outcome.outcome == "invalid_evaluation"
+    assert outcome.evaluation_validity == "invalid"
+    assert outcome.error_code == ErrorCode.PATCH_ERROR.value
+    assert outcome.outcome != "reject"
+
+
+def test_report_failure_overrides_zero_wrapper_exit() -> None:
+    """SDD Section 9.1: Report failure overrides zero wrapper exit."""
+    manifest = _make_manifest()
+    # Test failed in report, but wrapper returned 0 -> reject with EXIT_REPORT_MISMATCH
+    cap = _make_capture(exit_code=0)
+    report_data = {
+        "tests": [{"nodeid": "tests/test.py::test_pass", "outcome": "failed"}]
+    }
+    outcome = parse_capture(cap, manifest, json.dumps(report_data).encode("utf-8"))
+    assert outcome.outcome == "reject"
+    assert outcome.evaluation_validity == "valid"
+    assert outcome.error_code == "EXIT_REPORT_MISMATCH"
+    assert outcome.report is not None
+
+
+def test_empty_collection_is_invalid_evaluation() -> None:
+    """Empty test collection produces invalid_evaluation with EMPTY_COLLECTION error code."""
+    manifest = _make_manifest()
+    cap = _make_capture(exit_code=0)
+    report_data: dict[str, list[dict[str, str]]] = {"tests": []}
+    outcome = parse_capture(cap, manifest, json.dumps(report_data).encode("utf-8"))
+    assert outcome.outcome == "invalid_evaluation"
+    assert outcome.evaluation_validity == "invalid"
+    assert outcome.error_code == ErrorCode.EMPTY_COLLECTION.value
