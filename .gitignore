@@ -30,5 +30,10 @@ ENV/
 # Local scratch
 .coverage
 
+# VerifierCI runtime directories (SDD §3.3)
+.verifierci/
+runs/
+artifacts/
+
 # OS artifacts
 .DS_Store

@@ -720,3 +720,6 @@ __all__ = [
     "task_group",
     "task_import_command",
 ]
+
+if __name__ == "__main__":
+    raise SystemExit(main())
