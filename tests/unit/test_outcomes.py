@@ -53,19 +53,25 @@ def _make_capture(
     )
 
 
-def _make_manifest(parser_id: str = "pytest-report-v1") -> VerifierManifest:
+def _make_manifest(
+    parser_id: str = "pytest-report-v1",
+    *,
+    expected_collection: tuple[str, ...] = ("tests/test.py::test_pass",),
+    required_pass_ids: tuple[str, ...] = ("tests/test.py::test_pass",),
+    permitted_skips: tuple[str, ...] = (),
+) -> VerifierManifest:
     return VerifierManifest(
         manifest_hash="mhash" + "0" * 59,
         mode="compatibility",
         command=("pytest",),
         build_command=(),
-        expected_collection=("tests/test.py::test_pass",),
+        expected_collection=expected_collection,
         parser_id=parser_id,
         report_path="report.json",
         payload_digest="pay" + "0" * 61,
         allowed_edit_paths=("*",),
-        required_pass_ids=("tests/test.py::test_pass",),
-        permitted_skips=(),
+        required_pass_ids=required_pass_ids,
+        permitted_skips=permitted_skips,
         timeout_seconds=30,
     )
 
@@ -152,3 +158,148 @@ def test_unknown_parser() -> None:
     assert outcome.outcome == "invalid_evaluation"
     assert outcome.evaluation_validity == "invalid"
     assert outcome.error_code == ErrorCode.PARSER_ERROR.value
+
+
+def test_precedence_tier_4_duplicate_ids() -> None:
+    manifest = _make_manifest()
+    cap = _make_capture(exit_code=0)
+    report_data = {
+        "tests": [
+            {"nodeid": "tests/test.py::test_pass", "outcome": "passed"},
+            {"nodeid": "tests/test.py::test_pass", "outcome": "passed"},
+        ]
+    }
+    outcome = parse_capture(cap, manifest, json.dumps(report_data).encode("utf-8"))
+    assert outcome.outcome == "invalid_evaluation"
+    assert outcome.evaluation_validity == "invalid"
+    assert outcome.error_code == ErrorCode.PARSER_ERROR.value
+
+
+def test_precedence_tier_4_missing_report() -> None:
+    manifest = _make_manifest()
+    cap = _make_capture(exit_code=0)
+    outcome = parse_capture(cap, manifest, None)
+    assert outcome.outcome == "invalid_evaluation"
+    assert outcome.evaluation_validity == "invalid"
+    assert outcome.error_code == ErrorCode.EMPTY_COLLECTION.value
+
+
+def test_precedence_tier_4_collection_mismatch() -> None:
+    manifest = _make_manifest(expected_collection=("tests/test.py::test_pass",))
+    cap = _make_capture(exit_code=0)
+    report_data = {
+        "tests": [{"nodeid": "tests/test.py::unexpected", "outcome": "passed"}]
+    }
+    outcome = parse_capture(cap, manifest, json.dumps(report_data).encode("utf-8"))
+    assert outcome.outcome == "invalid_evaluation"
+    assert outcome.evaluation_validity == "invalid"
+    assert outcome.error_code == ErrorCode.COLLECTION_MISMATCH.value
+
+
+def test_precedence_tier_4_forbidden_skip() -> None:
+    manifest = _make_manifest(
+        expected_collection=("tests/test.py::test_pass",),
+        permitted_skips=(),
+    )
+    cap = _make_capture(exit_code=0)
+    report_data = {
+        "tests": [{"nodeid": "tests/test.py::test_pass", "outcome": "skipped"}]
+    }
+    outcome = parse_capture(cap, manifest, json.dumps(report_data).encode("utf-8"))
+    assert outcome.outcome == "invalid_evaluation"
+    assert outcome.evaluation_validity == "invalid"
+    assert outcome.error_code == ErrorCode.COLLECTION_MISMATCH.value
+
+
+def test_precedence_tier_5_reject_valid_with_exit_0_mismatch() -> None:
+    manifest = _make_manifest()
+    # Test failed in report, but runner returned 0 -> reject (valid) with EXIT_REPORT_MISMATCH
+    cap = _make_capture(exit_code=0)
+    report_data = {
+        "tests": [{"nodeid": "tests/test.py::test_pass", "outcome": "failed"}]
+    }
+    outcome = parse_capture(cap, manifest, json.dumps(report_data).encode("utf-8"))
+    assert outcome.outcome == "reject"
+    assert outcome.evaluation_validity == "valid"
+    assert outcome.error_code == "EXIT_REPORT_MISMATCH"
+    assert outcome.report is not None
+
+
+def test_precedence_tier_5_reject_valid_with_exit_1() -> None:
+    manifest = _make_manifest()
+    # Test failed in report and runner returned 1 -> reject (valid) with error_code=None
+    cap = _make_capture(exit_code=1)
+    report_data = {
+        "tests": [{"nodeid": "tests/test.py::test_pass", "outcome": "failed"}]
+    }
+    outcome = parse_capture(cap, manifest, json.dumps(report_data).encode("utf-8"))
+    assert outcome.outcome == "reject"
+    assert outcome.evaluation_validity == "valid"
+    assert outcome.error_code is None
+    assert outcome.report is not None
+
+
+def test_precedence_tier_6_accept_valid_with_exit_0() -> None:
+    manifest = _make_manifest()
+    cap = _make_capture(exit_code=0)
+    report_data = {
+        "tests": [{"nodeid": "tests/test.py::test_pass", "outcome": "passed"}]
+    }
+    outcome = parse_capture(cap, manifest, json.dumps(report_data).encode("utf-8"))
+    assert outcome.outcome == "accept"
+    assert outcome.evaluation_validity == "valid"
+    assert outcome.error_code is None
+    assert outcome.report is not None
+
+
+def test_precedence_tier_6_accept_invalid_with_exit_mismatch() -> None:
+    manifest = _make_manifest()
+    # All tests passed in report, but exit_code was 1 -> invalid_evaluation with EXIT_REPORT_MISMATCH
+    cap = _make_capture(exit_code=1)
+    report_data = {
+        "tests": [{"nodeid": "tests/test.py::test_pass", "outcome": "passed"}]
+    }
+    outcome = parse_capture(cap, manifest, json.dumps(report_data).encode("utf-8"))
+    assert outcome.outcome == "invalid_evaluation"
+    assert outcome.evaluation_validity == "invalid"
+    assert outcome.error_code == "EXIT_REPORT_MISMATCH"
+
+
+def test_precedence_ordering_patch_and_build_over_timeout() -> None:
+    manifest = _make_manifest()
+    # Patch error beats timeout
+    cap_patch = _make_capture(runtime_error=ErrorCode.PATCH_ERROR.value, timed_out=True)
+    outcome_patch = parse_capture(cap_patch, manifest)
+    assert outcome_patch.error_code == ErrorCode.PATCH_ERROR.value
+
+    # Build error beats timeout
+    cap_build = _make_capture(build_exit_code=1, timed_out=True)
+    outcome_build = parse_capture(cap_build, manifest)
+    assert outcome_build.error_code == ErrorCode.BUILD_ERROR.value
+
+
+def test_precedence_ordering_timeout_over_report() -> None:
+    manifest = _make_manifest()
+    # Timeout beats valid passing report
+    cap = _make_capture(exit_code=0, timed_out=True)
+    report_data = {
+        "tests": [{"nodeid": "tests/test.py::test_pass", "outcome": "passed"}]
+    }
+    outcome = parse_capture(cap, manifest, json.dumps(report_data).encode("utf-8"))
+    assert outcome.outcome == "invalid_evaluation"
+    assert outcome.error_code == ErrorCode.TIMEOUT.value
+    assert outcome.report is None
+
+
+def test_evidence_digests_propagation() -> None:
+    manifest = _make_manifest()
+    cap = _make_capture(
+        stdout_hash="h_out",
+        stderr_hash="h_err",
+        report_digest="h_rep",
+    )
+    report_data = {
+        "tests": [{"nodeid": "tests/test.py::test_pass", "outcome": "passed"}]
+    }
+    outcome = parse_capture(cap, manifest, json.dumps(report_data).encode("utf-8"))
+    assert outcome.evidence_digests == ("h_out", "h_err", "h_rep")
