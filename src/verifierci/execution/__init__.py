@@ -20,7 +20,13 @@ from .planner import (
     plan_audit,
     plan_jobs,
 )
-from .sandbox import cleanup_attempt, execute, prepare_workspace, validate_patch
+from .sandbox import (
+    cleanup_attempt,
+    collect_output_files,
+    execute,
+    prepare_workspace,
+    validate_patch,
+)
 from .worker import Worker
 
 __all__ = [
@@ -32,6 +38,7 @@ __all__ = [
     "build_matrix",
     "claim",
     "cleanup_attempt",
+    "collect_output_files",
     "complete",
     "compute_expansion_digest",
     "execute",

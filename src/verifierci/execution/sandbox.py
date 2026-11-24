@@ -15,6 +15,7 @@ import signal
 import subprocess
 import threading
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +27,8 @@ from verifierci.errors import (
 from verifierci.models.protocol import ExecutionCapture, Job, ResourceUsage
 
 DEFAULT_MAX_CAPTURE_BYTES = 10 * 1024 * 1024  # 10 MiB stream cap
+DEFAULT_MAX_AGGREGATE_OUT_BYTES = 64 * 1024 * 1024  # 64 MiB
+DEFAULT_MAX_OUT_FILES = 64
 
 
 def validate_patch(diff: bytes, allowed_paths: tuple[str, ...]) -> None:
@@ -56,19 +59,33 @@ def validate_patch(diff: bytes, allowed_paths: tuple[str, ...]) -> None:
 
         target_files = []
         if line.startswith(("--- a/", "--- b/", "+++ a/", "+++ b/")):
-            target_files.append(line[6:].strip())
+            raw_target = line[6:].split("\t")[0].strip()
+            target_files.append(raw_target)
+        elif line.startswith(("--- ", "+++ ")):
+            raw_target = line[4:].split("\t")[0].strip()
+            target_files.append(raw_target)
         elif line.startswith(("rename from ", "rename to ")):
-            target_files.append(line[12:].strip())
-        elif line.startswith("diff --git a/"):
+            target_files.append(line[12:].split("\t")[0].strip())
+        elif line.startswith(("copy from ", "copy to ")):
+            target_files.append(line[10:].split("\t")[0].strip())
+        elif line.startswith("diff --git "):
             parts = line.split(" ")
-            if len(parts) >= 3 and parts[2].startswith("a/"):
-                target_files.append(parts[2][2:].strip())
-            if len(parts) >= 4 and parts[3].startswith("b/"):
-                target_files.append(parts[3][2:].strip())
+            if len(parts) >= 3:
+                p2 = parts[2].strip()
+                target_files.append(p2[2:].strip() if p2.startswith("a/") else p2)
+            if len(parts) >= 4:
+                p3 = parts[3].strip()
+                target_files.append(p3[2:].strip() if p3.startswith("b/") else p3)
 
         for target_file in target_files:
             if not target_file or target_file == "/dev/null":
                 continue
+
+            if "\0" in target_file:
+                raise ProtectionError(
+                    f"Null byte in patch path is prohibited: {target_file}",
+                    code=ErrorCode.PROTECTION_ERROR.value,
+                )
 
             if target_file.startswith(("/", "\\")):
                 raise ProtectionError(
@@ -76,7 +93,7 @@ def validate_patch(diff: bytes, allowed_paths: tuple[str, ...]) -> None:
                     code=ErrorCode.PROTECTION_ERROR.value,
                 )
             parts = target_file.replace("\\", "/").split("/")
-            if ".." in parts or "." in parts:
+            if ".." in parts or "." in parts or any(p in ("..", ".") for p in parts):
                 raise ProtectionError(
                     f"Path traversal in patch is prohibited: {target_file}",
                     code=ErrorCode.PROTECTION_ERROR.value,
@@ -111,16 +128,34 @@ def prepare_workspace(
 ) -> Path:
     """Prepare a fresh attempt workspace directory structure.
 
-    Layout:
+    Layout per SDD Section 7.3 & ADR 0007:
       root/attempts/<attempt_id>/
-        source/   # Snapshot copy with diff applied
-        meta/     # Trusted metadata and commands
-        out/      # Output directory for test reports
-        capture/  # Captured stdout/stderr streams
+        source/   # Snapshot copy with diff applied (mode 0700)
+        meta/     # Trusted metadata and commands (mode 0700)
+        out/      # Output directory for test reports (mode 0700)
+        capture/  # Captured stdout/stderr streams (mode 0700)
+    All attempt directories are scaffolded with 0700 permissions.
     """
-    attempt_id = job.attempt_id or "default"
-    attempt_dir = root / "attempts" / attempt_id
-    attempt_dir.mkdir(parents=True, exist_ok=True)
+    attempt_id = job.attempt_id or str(uuid.uuid4())
+    if "/" in attempt_id or "\\" in attempt_id or ".." in attempt_id or not attempt_id:
+        raise ValidationError(
+            f"Invalid attempt_id: {attempt_id}",
+            code=ErrorCode.VALIDATION_ERROR.value,
+        )
+
+    attempts_dir = root / "attempts"
+    attempts_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        os.chmod(attempts_dir, 0o700)
+    except OSError:
+        pass
+
+    attempt_dir = attempts_dir / attempt_id
+    attempt_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        os.chmod(attempt_dir, 0o700)
+    except OSError:
+        pass
 
     source_dir = attempt_dir / "source"
     meta_dir = attempt_dir / "meta"
@@ -128,57 +163,79 @@ def prepare_workspace(
     capture_dir = attempt_dir / "capture"
 
     for d in (source_dir, meta_dir, out_dir, capture_dir):
-        d.mkdir(parents=True, exist_ok=True)
+        d.mkdir(parents=True, exist_ok=True, mode=0o700)
+        try:
+            os.chmod(d, 0o700)
+        except OSError:
+            pass
 
     # 1. Copy snapshot source (regular files only, skip symlinks)
     if snapshot_dir.is_dir():
         for src_path in snapshot_dir.rglob("*"):
             if src_path.is_file() and not src_path.is_symlink():
                 rel = src_path.relative_to(snapshot_dir)
+                # Check for intermediate symlink directories
+                if any(
+                    (snapshot_dir / p).is_symlink()
+                    for p in rel.parents
+                    if p != Path(".")
+                ):
+                    continue
+
                 dest = source_dir / rel
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(src_path, dest)
+                dest.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                try:
+                    os.chmod(dest.parent, 0o700)
+                except OSError:
+                    pass
+                shutil.copy2(src_path, dest, follow_symlinks=False)
 
     # 2. Apply patch if provided
     if diff_bytes and diff_bytes.strip():
         validate_patch(diff_bytes, allowed_paths)
         patch_file = meta_dir / "patch.diff"
         patch_file.write_bytes(diff_bytes)
+        try:
+            os.chmod(patch_file, 0o600)
+        except OSError:
+            pass
 
         # Apply using isolated Git
         empty_home = meta_dir / "git_home"
-        empty_home.mkdir(exist_ok=True)
+        empty_home.mkdir(exist_ok=True, mode=0o700)
+        try:
+            os.chmod(empty_home, 0o700)
+        except OSError:
+            pass
 
         git_env = {
             "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
             "HOME": str(empty_home),
             "GIT_CONFIG_NOSYSTEM": "1",
             "GIT_CONFIG_GLOBAL": "/dev/null",
-            "GIT_CEILING_DIRECTORIES": str(source_dir),
+            "GIT_CONFIG_SYSTEM": "/dev/null",
+            "GIT_CEILING_DIRECTORIES": str(attempt_dir),
             "LC_ALL": "C.UTF-8",
         }
-        check_cmd = [
+        common_git_args = [
             "git",
             "-c",
             "core.hooksPath=/dev/null",
             "-c",
             "core.autocrlf=false",
+            "-c",
+            "commit.gpgsign=false",
             "-C",
             str(source_dir),
+        ]
+        check_cmd = common_git_args + [
             "apply",
             "--check",
             "--whitespace=nowarn",
             "--",
             str(patch_file),
         ]
-        apply_cmd = [
-            "git",
-            "-c",
-            "core.hooksPath=/dev/null",
-            "-c",
-            "core.autocrlf=false",
-            "-C",
-            str(source_dir),
+        apply_cmd = common_git_args + [
             "apply",
             "--whitespace=nowarn",
             "--",
@@ -230,7 +287,32 @@ def execute(
     max_capture_bytes: int = DEFAULT_MAX_CAPTURE_BYTES,
     report_path: str = "report.json",
 ) -> ExecutionCapture:
-    """Supervise subprocess execution within the attempt workspace."""
+    """Supervise subprocess execution within the attempt workspace.
+
+    SDD Section 5, 7.2, and 7.3:
+    Executes command with shell=False, start_new_session=True, explicit allowlisted
+    environment, hard monotonic wall deadlines, and strict stream draining caps.
+    """
+    if not command:
+        raise ValidationError(
+            "Execution command cannot be empty.",
+            code=ErrorCode.VALIDATION_ERROR.value,
+        )
+
+    if timeout_seconds <= 0:
+        raise ValidationError(
+            f"timeout_seconds must be positive, got {timeout_seconds}.",
+            code=ErrorCode.VALIDATION_ERROR.value,
+        )
+
+    if not workspace.is_dir():
+        raise ValidationError(
+            f"Workspace directory does not exist: {workspace}",
+            code=ErrorCode.RUNTIME_UNAVAILABLE.value,
+        )
+
+    out_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+
     attempt_id = job.attempt_id or "unknown"
     start_time = time.monotonic()
 
@@ -314,7 +396,10 @@ def execute(
             try:
                 os.killpg(proc.pid, signal.SIGKILL)
             except OSError:
-                proc.kill()
+                try:
+                    proc.kill()
+                except OSError:
+                    pass
             try:
                 proc.wait(timeout=5)
             except (subprocess.TimeoutExpired, OSError):
@@ -350,9 +435,21 @@ def execute(
         if stderr_bytes:
             (capture_dir / "stderr.log").write_bytes(stderr_bytes)
 
-    # Check report file
+    # Validate and inspect report file without following symlinks
+    if ".." in report_path.replace("\\", "/").split("/"):
+        raise ProtectionError(
+            f"Path traversal in report_path is prohibited: {report_path}",
+            code=ErrorCode.PROTECTION_ERROR.value,
+        )
+
     rep_file = out_dir / report_path
     report_digest = None
+    if rep_file.is_symlink():
+        raise ProtectionError(
+            f"Symlink in report_path is prohibited: {report_path}",
+            code=ErrorCode.PROTECTION_ERROR.value,
+        )
+
     if rep_file.is_file():
         if rep_file.stat().st_size > max_capture_bytes:
             truncated = True
@@ -393,8 +490,93 @@ def execute(
     )
 
 
+def collect_output_files(
+    out_dir: Path,
+    *,
+    allowed_filenames: tuple[str, ...] = ("report.json",),
+    max_bytes_per_file: int = 16 * 1024 * 1024,
+    max_aggregate_bytes: int = DEFAULT_MAX_AGGREGATE_OUT_BYTES,
+    max_files: int = DEFAULT_MAX_OUT_FILES,
+) -> dict[str, Path]:
+    """Collect allowlisted output files from out_dir without following symlinks.
+
+    SDD Section 5 & 7.3:
+    Rejects/skips symlinks, directory traversal, hidden files, and files exceeding limits.
+    Returns mapping from relative filename to Path.
+    """
+    if not out_dir.is_dir():
+        return {}
+
+    collected: dict[str, Path] = {}
+    total_bytes = 0
+
+    normalized_allowed: set[str] = set()
+    for name in allowed_filenames:
+        if not name or name.startswith(("/", "\\")):
+            continue
+        parts = name.replace("\\", "/").split("/")
+        if ".." in parts or "." in parts:
+            continue
+        normalized_allowed.add(str(Path(name)))
+
+    for path in sorted(out_dir.rglob("*")):
+        if len(collected) >= max_files:
+            break
+        # Reject and skip any symlinks - never follow symlinks!
+        if path.is_symlink():
+            continue
+        if not path.is_file():
+            continue
+
+        try:
+            rel = str(path.relative_to(out_dir))
+        except ValueError:
+            continue
+
+        matched = False
+        if (
+            "*" in allowed_filenames
+            or not allowed_filenames
+            or rel in normalized_allowed
+        ):
+            matched = True
+        else:
+            for pattern in allowed_filenames:
+                if fnmatch.fnmatch(rel, pattern):
+                    matched = True
+                    break
+
+        if not matched:
+            continue
+
+        size = path.stat().st_size
+        if size > max_bytes_per_file:
+            continue
+        if total_bytes + size > max_aggregate_bytes:
+            break
+
+        total_bytes += size
+        collected[rel] = path
+
+    return collected
+
+
 def cleanup_attempt(attempt_id: str, root: Path) -> None:
     """Remove all attempt directory state."""
+    if "/" in attempt_id or "\\" in attempt_id or ".." in attempt_id or not attempt_id:
+        raise ValidationError(
+            f"Invalid attempt_id: {attempt_id}",
+            code=ErrorCode.VALIDATION_ERROR.value,
+        )
     attempt_dir = root / "attempts" / attempt_id
     if attempt_dir.exists():
         shutil.rmtree(attempt_dir, ignore_errors=True)
+
+
+__all__ = [
+    "cleanup_attempt",
+    "collect_output_files",
+    "execute",
+    "prepare_workspace",
+    "validate_patch",
+]

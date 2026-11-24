@@ -16,6 +16,7 @@ import pytest
 from verifierci.errors import ErrorCode, ProtectionError, ValidationError
 from verifierci.execution.sandbox import (
     cleanup_attempt,
+    collect_output_files,
     execute,
     prepare_workspace,
     validate_patch,
@@ -385,3 +386,216 @@ def test_validate_patch_empty_or_none() -> None:
     # Empty diff or None does nothing
     validate_patch(b"", allowed_paths=("*",))
     validate_patch(b"   ", allowed_paths=("*",))
+
+
+def test_workspace_permissions_0700() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        snap_dir = root / "snap"
+        snap_dir.mkdir()
+        (snap_dir / "app.py").write_text("print('hello')\n")
+
+        job = _make_dummy_job("att-perms-test")
+        attempt_dir = prepare_workspace(
+            job=job,
+            snapshot_dir=snap_dir,
+            diff_bytes=None,
+            allowed_paths=("*",),
+            root=root,
+        )
+
+        assert attempt_dir.is_dir()
+        # Verify 0700 permissions
+        assert (attempt_dir.stat().st_mode & 0o777) == 0o700
+        for sub in ("source", "meta", "out", "capture"):
+            sub_dir = attempt_dir / sub
+            assert sub_dir.is_dir()
+            assert (sub_dir.stat().st_mode & 0o777) == 0o700
+
+
+def test_snapshot_symlink_ignored() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        snap_dir = root / "snap"
+        snap_dir.mkdir()
+        (snap_dir / "regular.txt").write_text("regular file\n")
+        # File symlink pointing to an outside file
+        outside_file = root / "outside.txt"
+        outside_file.write_text("secret\n")
+        (snap_dir / "symlink.txt").symlink_to(outside_file)
+
+        # Directory symlink
+        outside_dir = root / "outside_dir"
+        outside_dir.mkdir()
+        (outside_dir / "evil.txt").write_text("evil\n")
+        (snap_dir / "sym_dir").symlink_to(outside_dir)
+
+        job = _make_dummy_job("att-symlink-snap")
+        attempt_dir = prepare_workspace(
+            job=job,
+            snapshot_dir=snap_dir,
+            diff_bytes=None,
+            allowed_paths=("*",),
+            root=root,
+        )
+
+        source_dir = attempt_dir / "source"
+        assert (source_dir / "regular.txt").is_file()
+        assert not (source_dir / "symlink.txt").exists()
+        assert not (source_dir / "sym_dir").exists()
+
+
+def test_attempt_id_validation_and_cleanup_traversal() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        snap_dir = root / "snap"
+        snap_dir.mkdir()
+
+        job_bad = _make_dummy_job("../escape")
+        with pytest.raises(ValidationError, match="Invalid attempt_id") as exc:
+            prepare_workspace(
+                job=job_bad,
+                snapshot_dir=snap_dir,
+                diff_bytes=None,
+                allowed_paths=("*",),
+                root=root,
+            )
+        assert exc.value.code == ErrorCode.VALIDATION_ERROR.value
+
+        with pytest.raises(ValidationError, match="Invalid attempt_id") as exc:
+            cleanup_attempt("../escape", root=root)
+        assert exc.value.code == ErrorCode.VALIDATION_ERROR.value
+
+        with pytest.raises(ValidationError, match="Invalid attempt_id") as exc:
+            cleanup_attempt("", root=root)
+        assert exc.value.code == ErrorCode.VALIDATION_ERROR.value
+
+
+def test_execute_command_validation() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        source = root / "source"
+        source.mkdir()
+        out = root / "out"
+        out.mkdir()
+        job = _make_dummy_job("att-val-test")
+
+        # Empty command
+        with pytest.raises(ValidationError, match="cannot be empty") as exc:
+            execute(job=job, command=(), workspace=source, out_dir=out)
+        assert exc.value.code == ErrorCode.VALIDATION_ERROR.value
+
+        # Non-positive timeout
+        with pytest.raises(ValidationError, match="must be positive") as exc:
+            execute(
+                job=job,
+                command=("echo", "hi"),
+                workspace=source,
+                out_dir=out,
+                timeout_seconds=0,
+            )
+        assert exc.value.code == ErrorCode.VALIDATION_ERROR.value
+
+        with pytest.raises(ValidationError, match="must be positive") as exc:
+            execute(
+                job=job,
+                command=("echo", "hi"),
+                workspace=source,
+                out_dir=out,
+                timeout_seconds=-5,
+            )
+        assert exc.value.code == ErrorCode.VALIDATION_ERROR.value
+
+        # Nonexistent workspace
+        with pytest.raises(ValidationError, match="does not exist") as exc:
+            execute(
+                job=job,
+                command=("echo", "hi"),
+                workspace=root / "nonexistent",
+                out_dir=out,
+            )
+        assert exc.value.code == ErrorCode.RUNTIME_UNAVAILABLE.value
+
+
+def test_execute_report_symlink_prohibited() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        source = root / "source"
+        source.mkdir()
+        out = root / "out"
+        out.mkdir()
+        capture_dir = root / "capture"
+        capture_dir.mkdir()
+        job = _make_dummy_job("att-report-symlink")
+
+        # Create target file outside and symlink report.json to it
+        target_file = root / "secret_report.json"
+        target_file.write_text('{"summary": "pwned"}')
+        (out / "report.json").symlink_to(target_file)
+
+        with pytest.raises(
+            ProtectionError, match="Symlink in report_path is prohibited"
+        ) as exc:
+            execute(
+                job=job,
+                command=(sys.executable, "-c", "print('done')"),
+                workspace=source,
+                out_dir=out,
+                report_path="report.json",
+            )
+        assert exc.value.code == ErrorCode.PROTECTION_ERROR.value
+
+
+def test_execute_report_path_traversal_prohibited() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        source = root / "source"
+        source.mkdir()
+        out = root / "out"
+        out.mkdir()
+        capture_dir = root / "capture"
+        capture_dir.mkdir()
+        job = _make_dummy_job("att-report-traversal")
+
+        with pytest.raises(
+            ProtectionError, match="Path traversal in report_path is prohibited"
+        ) as exc:
+            execute(
+                job=job,
+                command=(sys.executable, "-c", "print('done')"),
+                workspace=source,
+                out_dir=out,
+                report_path="../escape_report.json",
+            )
+        assert exc.value.code == ErrorCode.PROTECTION_ERROR.value
+
+
+def test_collect_output_files_no_symlinks() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        out = Path(tmpdir) / "out"
+        out.mkdir()
+
+        (out / "report.json").write_text('{"summary": "pass"}')
+        (out / "output.txt").write_text("output content")
+
+        outside = Path(tmpdir) / "outside.txt"
+        outside.write_text("secret")
+        (out / "symlink.txt").symlink_to(outside)
+
+        # Collect files matching *.json and *.txt
+        collected = collect_output_files(out, allowed_filenames=("*.json", "*.txt"))
+
+        assert "report.json" in collected
+        assert "output.txt" in collected
+        assert "symlink.txt" not in collected  # Symlink skipped!
+        assert collected["report.json"] == out / "report.json"
+
+        # Max file limits
+        collected_one = collect_output_files(out, allowed_filenames=("*",), max_files=1)
+        assert len(collected_one) == 1
+
+        # Max byte limit
+        collected_capped = collect_output_files(
+            out, allowed_filenames=("*",), max_bytes_per_file=5
+        )
+        assert "output.txt" not in collected_capped  # Exceeds 5 bytes
