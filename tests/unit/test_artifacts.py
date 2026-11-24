@@ -385,7 +385,9 @@ def test_collect_outputs_aggregate_byte_limit(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("file_limit", [4, 16 * 1024 * 1024 + 1])
-def test_collect_outputs_default_aggregate_limit(tmp_path: Path, file_limit: int) -> None:
+def test_collect_outputs_default_aggregate_limit(
+    tmp_path: Path, file_limit: int
+) -> None:
     sandbox_dir = tmp_path / "sandbox"
     sandbox_dir.mkdir()
     store = ArtifactStore(tmp_path / "store")
@@ -399,7 +401,9 @@ def test_collect_outputs_default_aggregate_limit(tmp_path: Path, file_limit: int
     collected = store.collect_outputs(
         output_dir=sandbox_dir, allowed=allowed, max_bytes=file_limit
     )
-    assert [artifact.size_bytes for artifact in collected] == [file_limit] * len(allowed)
+    assert [artifact.size_bytes for artifact in collected] == [file_limit] * len(
+        allowed
+    )
 
 
 @pytest.mark.parametrize("aggregate_limit", [None, 100])

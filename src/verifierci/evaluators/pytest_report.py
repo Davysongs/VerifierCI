@@ -43,13 +43,19 @@ class PytestReportParser:
         capture: ExecutionCapture,
     ) -> ParsedOutcome:
         """Parse raw report bytes and classify the outcome according to test results."""
+        evidence_digests: tuple[str, ...] = tuple(
+            h
+            for h in (capture.stdout_hash, capture.stderr_hash, capture.report_digest)
+            if h is not None
+        )
+
         if not report_bytes or not report_bytes.strip():
             return ParsedOutcome(
                 outcome="invalid_evaluation",
                 evaluation_validity="invalid",
                 error_code=ErrorCode.EMPTY_COLLECTION.value,
                 report=None,
-                evidence_digests=(),
+                evidence_digests=evidence_digests,
             )
 
         try:
@@ -60,7 +66,7 @@ class PytestReportParser:
                 evaluation_validity="invalid",
                 error_code=ErrorCode.PARSER_ERROR.value,
                 report=None,
-                evidence_digests=(),
+                evidence_digests=evidence_digests,
             )
 
         if not isinstance(data, dict):
@@ -69,7 +75,7 @@ class PytestReportParser:
                 evaluation_validity="invalid",
                 error_code=ErrorCode.PARSER_ERROR.value,
                 report=None,
-                evidence_digests=(),
+                evidence_digests=evidence_digests,
             )
 
         # Extract test items
@@ -80,7 +86,7 @@ class PytestReportParser:
                 evaluation_validity="invalid",
                 error_code=ErrorCode.PARSER_ERROR.value,
                 report=None,
-                evidence_digests=(),
+                evidence_digests=evidence_digests,
             )
 
         collected_ids: list[str] = []
@@ -96,7 +102,7 @@ class PytestReportParser:
                     evaluation_validity="invalid",
                     error_code=ErrorCode.PARSER_ERROR.value,
                     report=None,
-                    evidence_digests=(),
+                    evidence_digests=evidence_digests,
                 )
             nodeid = t.get("nodeid")
             if not isinstance(nodeid, str) or not nodeid.strip():
@@ -105,7 +111,7 @@ class PytestReportParser:
                     evaluation_validity="invalid",
                     error_code=ErrorCode.PARSER_ERROR.value,
                     report=None,
-                    evidence_digests=(),
+                    evidence_digests=evidence_digests,
                 )
             collected_ids.append(nodeid)
             raw_outcome = str(t.get("outcome", "failed")).lower()
@@ -136,6 +142,16 @@ class PytestReportParser:
                 )
             )
 
+        # Reject duplicate test node IDs
+        if len(collected_ids) != len(set(collected_ids)):
+            return ParsedOutcome(
+                outcome="invalid_evaluation",
+                evaluation_validity="invalid",
+                error_code=ErrorCode.PARSER_ERROR.value,
+                report=None,
+                evidence_digests=evidence_digests,
+            )
+
         collected_tuple = tuple(collected_ids)
         test_report = TestReport(
             schema_version="1.0.0",
@@ -151,7 +167,7 @@ class PytestReportParser:
                 evaluation_validity="invalid",
                 error_code=ErrorCode.PARSER_ERROR.value,
                 report=test_report,
-                evidence_digests=(),
+                evidence_digests=evidence_digests,
             )
 
         # 1. Empty collection check
@@ -161,7 +177,7 @@ class PytestReportParser:
                 evaluation_validity="invalid",
                 error_code=ErrorCode.EMPTY_COLLECTION.value,
                 report=test_report,
-                evidence_digests=(),
+                evidence_digests=evidence_digests,
             )
 
         # 2. Compare against manifest.expected_collection if specified
@@ -174,7 +190,7 @@ class PytestReportParser:
                     evaluation_validity="invalid",
                     error_code=ErrorCode.COLLECTION_MISMATCH.value,
                     report=test_report,
-                    evidence_digests=(),
+                    evidence_digests=evidence_digests,
                 )
         if manifest.expected_collection and sorted(
             manifest.expected_collection
@@ -184,7 +200,7 @@ class PytestReportParser:
                 evaluation_validity="invalid",
                 error_code=ErrorCode.COLLECTION_MISMATCH.value,
                 report=test_report,
-                evidence_digests=(),
+                evidence_digests=evidence_digests,
             )
 
         # 3. Check for disallowed skips
@@ -196,7 +212,7 @@ class PytestReportParser:
                     evaluation_validity="invalid",
                     error_code=ErrorCode.COLLECTION_MISMATCH.value,
                     report=test_report,
-                    evidence_digests=(),
+                    evidence_digests=evidence_digests,
                 )
 
         # 4. Check required pass IDs and general pass/fail
@@ -219,7 +235,7 @@ class PytestReportParser:
                 evaluation_validity="invalid",
                 error_code="EXIT_REPORT_MISMATCH",
                 report=test_report,
-                evidence_digests=(),
+                evidence_digests=evidence_digests,
             )
 
         # Assertion failure -> reject (valid)
@@ -230,7 +246,7 @@ class PytestReportParser:
                 evaluation_validity="valid",
                 error_code=error_code,
                 report=test_report,
-                evidence_digests=(),
+                evidence_digests=evidence_digests,
             )
 
         # All passed -> accept (valid)
@@ -239,5 +255,5 @@ class PytestReportParser:
             evaluation_validity="valid",
             error_code=None,
             report=test_report,
-            evidence_digests=(),
+            evidence_digests=evidence_digests,
         )

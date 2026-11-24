@@ -614,7 +614,12 @@ def complete(
             job.worker_id is not None and row["worker_id"] != job.worker_id
         )
 
-        if lease_expired or lease_identity_invalid or attempt_not_current:
+        if (
+            lease_expired
+            or lease_identity_invalid
+            or attempt_not_current
+            or attempt.disposition == "stale"
+        ):
             _mark_attempt_stale(conn, attempt, now_ms)
             return "stale"
 
