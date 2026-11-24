@@ -229,6 +229,8 @@ def build_manifest(
         if options and options.timeout_seconds is not None
         else timeout_seconds
     )
+    if policy and policy.wall_seconds:
+        eff_timeout = min(eff_timeout, policy.wall_seconds)
     if eff_timeout <= 0:
         raise ValidationError(
             f"timeout_seconds must be > 0, got {eff_timeout}.",
@@ -246,14 +248,10 @@ def build_manifest(
             code=ErrorCode.VALIDATION_ERROR.value,
         )
 
-    eff_policy_hash = (
-        policy_hash
-        or (policy.policy_hash if policy else None)
-        or (
-            _file_or_name_hash(options.policy_file)
-            if options and options.policy_file
-            else hashlib.sha256(b"default_policy").hexdigest()
-        )
+    eff_policy_hash = policy_hash or (
+        _file_or_name_hash(options.policy_file)
+        if options and options.policy_file
+        else hashlib.sha256(b"default_policy").hexdigest()
     )
     eff_resource_policy = (
         resource_policy

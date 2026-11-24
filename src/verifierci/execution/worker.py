@@ -727,8 +727,6 @@ class Worker:
             # 7. Complete job via fenced queue
             if complete_now_ms is not None:
                 comp_time_ms = complete_now_ms
-            elif now_ms is not None:
-                comp_time_ms = now_ms
             else:
                 comp_time_ms = self.clock()
 

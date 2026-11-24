@@ -600,3 +600,86 @@ def test_import_task_modular_requirement_files() -> None:
         assert len(bundle.requirements) == 3
         req_ids = [r.requirement_id for r in bundle.requirements]
         assert req_ids == ["REQ-0", "REQ-1", "REQ-2"]
+
+
+def test_local_adapter_deduplicates_requirement_files() -> None:
+    """Duplicate requirement files (including ./ prefix variants) are deduplicated."""
+    adapter = LocalAdapter()
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        td = Path(tmp_dir)
+        (td / "source").mkdir()
+        (td / "contract.yaml").write_text("requirements: []\n")
+        (td / "environment.yaml").write_text("schema_version: '1.0.0'\n")
+        (td / "v1.yaml").write_text("command: [pytest]\n")
+        (td / "r1.yaml").write_text("- requirement_id: REQ-1\n  text: Req 1\n")
+        task_f = td / "task.yaml"
+        # Lists r1.yaml twice: once plain and once with ./
+        task_f.write_text(
+            "schema_version: '1.0.0'\n"
+            "task_id: t_dedup\n"
+            "version: '1.0.0'\n"
+            "statement: s\n"
+            "contract: contract.yaml\n"
+            "snapshot: source/\n"
+            "verifier: v1.yaml\n"
+            "requirement_files:\n"
+            "  - r1.yaml\n"
+            "  - ./r1.yaml\n"
+        )
+
+        req = ImportRequest(
+            adapter="local",
+            instance="t_dedup",
+            source=str(task_f),
+            source_revision="v1",
+            environment_manifest=None,
+            output_dir=str(td / "out"),
+            dry_run=True,
+        )
+        bundle = adapter.import_task(req)
+        # Should contain REQ-1 exactly once
+        assert len(bundle.requirements) == 1
+        assert bundle.requirements[0].requirement_id == "REQ-1"
+        # source_locator defaults to the requirement file name
+        assert bundle.requirements[0].source_locator == "r1.yaml"
+
+
+def test_local_adapter_preserves_explicit_source_locator() -> None:
+    """Explicit source_locator in external requirement is preserved."""
+    adapter = LocalAdapter()
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        td = Path(tmp_dir)
+        (td / "source").mkdir()
+        (td / "contract.yaml").write_text("requirements: []\n")
+        (td / "environment.yaml").write_text("schema_version: '1.0.0'\n")
+        (td / "v1.yaml").write_text("command: [pytest]\n")
+        (td / "r_custom.yaml").write_text(
+            "- requirement_id: REQ-CUSTOM\n"
+            "  text: Req with custom locator\n"
+            "  source_locator: docs/specs.md#req-1\n"
+        )
+        task_f = td / "task.yaml"
+        task_f.write_text(
+            "schema_version: '1.0.0'\n"
+            "task_id: t_custom\n"
+            "version: '1.0.0'\n"
+            "statement: s\n"
+            "contract: contract.yaml\n"
+            "snapshot: source/\n"
+            "verifier: v1.yaml\n"
+            "requirement_files:\n"
+            "  - r_custom.yaml\n"
+        )
+
+        req = ImportRequest(
+            adapter="local",
+            instance="t_custom",
+            source=str(task_f),
+            source_revision="v1",
+            environment_manifest=None,
+            output_dir=str(td / "out"),
+            dry_run=True,
+        )
+        bundle = adapter.import_task(req)
+        assert len(bundle.requirements) == 1
+        assert bundle.requirements[0].source_locator == "docs/specs.md#req-1"

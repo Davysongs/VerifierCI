@@ -48,37 +48,64 @@ def parse_capture(
         if h is not None
     )
 
-    # 1 & 2 & 3: Check runtime_error diagnostics
+    # Tier 1 & 2 & 3: Check runtime_error diagnostics and build_exit_code
+    tier_2_runtime_codes = {
+        ErrorCode.PATCH_ERROR.value,
+        ErrorCode.PROTECTION_ERROR.value,
+        ErrorCode.VALIDATION_ERROR.value,
+        ErrorCode.BUILD_ERROR.value,
+    }
+    tier_3_runtime_codes = {
+        ErrorCode.CANCELLED.value,
+        ErrorCode.TIMEOUT.value,
+        ErrorCode.RESOURCE_EXHAUSTED.value,
+        ErrorCode.ARTIFACT_LIMIT.value,
+    }
+
     if capture.runtime_error:
-        # Tier 2: Patch application errors
-        if (
-            capture.runtime_error
-            in (
-                ErrorCode.PATCH_ERROR.value,
-                ErrorCode.PROTECTION_ERROR.value,
-                ErrorCode.VALIDATION_ERROR.value,
-            )
+        is_tier_2 = (
+            capture.runtime_error in tier_2_runtime_codes
             or "patch" in capture.runtime_error.lower()
-        ):
+        )
+        is_tier_3 = capture.runtime_error in tier_3_runtime_codes
+
+        if not is_tier_2 and not is_tier_3:
+            # Tier 1: True infrastructure / runtime failure
             return ParsedOutcome(
-                outcome="invalid_evaluation",
+                outcome="error",
                 evaluation_validity="invalid",
-                error_code=ErrorCode.PATCH_ERROR.value,
+                error_code=capture.runtime_error,
                 report=None,
                 evidence_digests=evidence_digests,
             )
 
-        # Tier 2: Build errors
-        if capture.runtime_error == ErrorCode.BUILD_ERROR.value:
+        if is_tier_2:
+            # Tier 2: Patch or build error from runtime_error
+            err_code = (
+                ErrorCode.BUILD_ERROR.value
+                if capture.runtime_error == ErrorCode.BUILD_ERROR.value
+                else ErrorCode.PATCH_ERROR.value
+            )
             return ParsedOutcome(
                 outcome="invalid_evaluation",
                 evaluation_validity="invalid",
-                error_code=ErrorCode.BUILD_ERROR.value,
+                error_code=err_code,
                 report=None,
                 evidence_digests=evidence_digests,
             )
 
-        # Tier 3: Timeout / Cancellation / Limits in runtime_error
+    # Tier 2: Build failure from build_exit_code (takes precedence over Tier 3 timeouts/cancellations)
+    if capture.build_exit_code is not None and capture.build_exit_code != 0:
+        return ParsedOutcome(
+            outcome="invalid_evaluation",
+            evaluation_validity="invalid",
+            error_code=ErrorCode.BUILD_ERROR.value,
+            report=None,
+            evidence_digests=evidence_digests,
+        )
+
+    # Tier 3: Timeout / Cancellation / Limits in runtime_error
+    if capture.runtime_error:
         if capture.runtime_error == ErrorCode.CANCELLED.value:
             return ParsedOutcome(
                 outcome="invalid_evaluation",
@@ -112,21 +139,11 @@ def parse_capture(
                 evidence_digests=evidence_digests,
             )
 
-        # Tier 1: True infrastructure / runtime failure
+        # Fallback infrastructure error
         return ParsedOutcome(
             outcome="error",
             evaluation_validity="invalid",
             error_code=capture.runtime_error,
-            report=None,
-            evidence_digests=evidence_digests,
-        )
-
-    # 2. Patch / build error from build_exit_code
-    if capture.build_exit_code is not None and capture.build_exit_code != 0:
-        return ParsedOutcome(
-            outcome="invalid_evaluation",
-            evaluation_validity="invalid",
-            error_code=ErrorCode.BUILD_ERROR.value,
             report=None,
             evidence_digests=evidence_digests,
         )

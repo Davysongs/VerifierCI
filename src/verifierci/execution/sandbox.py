@@ -59,10 +59,12 @@ def validate_patch(diff: bytes, allowed_paths: tuple[str, ...]) -> None:
 
         target_files = []
         if line.startswith(("--- a/", "--- b/", "+++ a/", "+++ b/")):
-            raw_target = line[6:].split("\t")[0].strip()
+            raw_target = line[6:].split("\t")[0].strip().strip('"')
             target_files.append(raw_target)
         elif line.startswith(("--- ", "+++ ")):
-            raw_target = line[4:].split("\t")[0].strip()
+            raw_target = line[4:].split("\t")[0].strip().strip('"')
+            if raw_target.startswith(("a/", "b/")):
+                raw_target = raw_target[2:]
             target_files.append(raw_target)
         elif line.startswith("rename from "):
             target_files.append(line[len("rename from ") :].split("\t")[0].strip())
@@ -73,13 +75,24 @@ def validate_patch(diff: bytes, allowed_paths: tuple[str, ...]) -> None:
         elif line.startswith("copy to "):
             target_files.append(line[len("copy to ") :].split("\t")[0].strip())
         elif line.startswith("diff --git "):
-            parts = line.split(" ")
-            if len(parts) >= 3:
-                p2 = parts[2].strip()
-                target_files.append(p2[2:].strip() if p2.startswith("a/") else p2)
-            if len(parts) >= 4:
-                p3 = parts[3].strip()
-                target_files.append(p3[2:].strip() if p3.startswith("b/") else p3)
+            rest = line[len("diff --git ") :].strip()
+            if rest.startswith('"'):
+                quoted_parts = [p.strip('"') for p in rest.split('" "')]
+                if len(quoted_parts) >= 1:
+                    p1 = quoted_parts[0]
+                    target_files.append(p1.removeprefix("a/"))
+                if len(quoted_parts) >= 2:
+                    p2 = quoted_parts[1]
+                    target_files.append(p2.removeprefix("b/"))
+            else:
+                left, sep, right = rest.partition(" b/")
+                if sep:
+                    p1 = left.removeprefix("a/")
+                    p2 = right
+                    target_files.append(p1)
+                    target_files.append(p2)
+                else:
+                    target_files.append(rest)
 
         for target_file in target_files:
             if not target_file or target_file == "/dev/null":

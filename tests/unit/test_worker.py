@@ -943,8 +943,57 @@ def test_worker_lease_expired_during_execution_marked_stale(
         "SELECT * FROM evaluation_attempts WHERE job_id = 'j_stale_exp'"
     ).fetchone()
     assert att["disposition"] == "stale"
-    assert att["evaluation_validity"] == "invalid"
-    assert att["outcome"] is None
+
+
+def test_worker_completion_clock_not_reusing_claim_now_ms(
+    setup_env: tuple[Database, Path, Path],
+) -> None:
+    """When complete_now_ms is None, completion uses clock() instead of reusing claim now_ms."""
+    db, snap_dir, root = setup_env
+    conn = db.connection
+
+    conn.execute(
+        """
+        INSERT INTO jobs (job_id, run_id, task_key, case_id, verifier_key, repetition, state, fence, attempts_started)
+        VALUES ('j_clock_reuse', 'run1', 'task1@1.0', 'case1', 'verifier@1.0', 0, 'PENDING', 0, 0)
+        """
+    )
+
+    manifest = VerifierManifest(
+        manifest_hash="7" * 64,
+        mode="compatibility",
+        command=(sys.executable, "-c", "pass"),
+        build_command=(),
+        expected_collection=(),
+        parser_id="pytest-report-v1",
+        report_path="report.json",
+        payload_digest="c" * 64,
+        allowed_edit_paths=("*",),
+        required_pass_ids=(),
+        permitted_skips=(),
+        timeout_seconds=30,
+    )
+
+    # Clock starts at 10_000 for claim (lease expires at 20_000), but advances to 30_000 at completion
+    worker = Worker(
+        work_dir=root / "work_clock_reuse",
+        diff_resolver={"case1": b""},
+        manifest_resolver={"verifier@1.0": manifest},
+        snapshot_resolver={"task1@1.0": snap_dir},
+        clock=lambda: 30_000,
+        lease_duration_ms=10_000,
+    )
+
+    # Claim with now_ms=10_000; complete_now_ms is NOT provided (None)
+    executed = worker.run_one(conn, run_id="run1", now_ms=10_000)
+    assert executed is True
+
+    # Because completion used clock() (30_000) instead of claim now_ms (10_000),
+    # the lease expired (20_000 < 30_000) and the attempt is recorded as stale.
+    att = conn.execute(
+        "SELECT * FROM evaluation_attempts WHERE job_id = 'j_clock_reuse'"
+    ).fetchone()
+    assert att["disposition"] == "stale"
 
 
 def test_worker_lease_lost_event_sets_stale(

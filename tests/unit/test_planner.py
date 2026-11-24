@@ -11,6 +11,7 @@ import dataclasses
 import hashlib
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Any
 
 import pytest
 
@@ -511,3 +512,92 @@ def test_audit_planner_expansion_invariants() -> None:
         digest
         == hashlib.sha256(canonical_bytes(sorted(j.job_id for j in jobs))).hexdigest()
     )
+
+
+def _make_options(**kwargs: Any) -> AuditOptions:
+    defaults: dict[str, Any] = {
+        "task_files": ("task1.yaml",),
+        "benchmark_file": None,
+        "panel_file": "panel.yaml",
+        "baseline_file": "base.yaml",
+        "candidate_file": "cand.yaml",
+        "repetitions": 1,
+        "backend": "fixture",
+        "trusted_fixture": True,
+        "sandbox_policy_file": "sandbox.yaml",
+        "max_attempts": 1,
+        "offline": True,
+        "output_dir": None,
+        "dry_run": False,
+        "resume_run_id": None,
+        "parent_run_id": None,
+        "policy_file": "policy.yaml",
+        "analysis_plan_file": None,
+        "max_jobs": 100,
+        "concurrency": 1,
+        "timeout_seconds": 60,
+        "seed": 0,
+        "collect_only": False,
+        "diagnostic": False,
+    }
+    defaults.update(kwargs)
+    return AuditOptions(**defaults)
+
+
+def _make_policy(**kwargs: Any) -> SandboxPolicy:
+    defaults: dict[str, Any] = {
+        "policy_hash": "p" + "0" * 63,
+        "cpus": 2.0,
+        "memory_bytes": 2 * 1024 * 1024 * 1024,
+        "pids": 128,
+        "wall_seconds": 120,
+        "cleanup_grace_seconds": 5,
+        "workspace_bytes": 2 * 1024 * 1024 * 1024,
+        "workspace_inodes": 100000,
+        "tmp_bytes": 128 * 1024 * 1024,
+        "artifact_bytes": 16 * 1024 * 1024,
+        "stream_bytes": 4 * 1024 * 1024,
+        "artifact_files": 64,
+        "network": "none",
+        "seccomp_digest": "s" + "0" * 63,
+        "max_jobs": 100,
+        "max_concurrency": 1,
+    }
+    defaults.update(kwargs)
+    return SandboxPolicy(**defaults)
+
+
+def test_plan_audit_timeout_capped_by_sandbox_policy() -> None:
+    """Requested timeout is capped at policy.wall_seconds when ceiling is exceeded."""
+    pin = _make_pin()
+    # Requested timeout is 600s, but sandbox policy has wall_seconds=120s
+    options = _make_options(timeout_seconds=600)
+    policy = _make_policy(wall_seconds=120)
+    manifest, _ = plan_audit(task_pins=(pin,), options=options, policy=policy)
+    assert manifest.timeout_seconds == 120
+
+    # Below ceiling: requested timeout is preserved
+    options_low = _make_options(timeout_seconds=60)
+    manifest_low, _ = plan_audit(task_pins=(pin,), options=options_low, policy=policy)
+    assert manifest_low.timeout_seconds == 60
+
+
+def test_plan_audit_gate_policy_hash_independent_of_sandbox_policy() -> None:
+    """AuditManifest.policy_hash reflects gate policy, not SandboxPolicy.policy_hash."""
+    pin = _make_pin()
+    policy = _make_policy(
+        policy_hash="sandbox_hash_" + "0" * 51,
+        wall_seconds=300,
+    )
+    options1 = _make_options(policy_file="gate_policy_1.yaml")
+    options2 = _make_options(policy_file="gate_policy_2.yaml")
+    manifest1, _ = plan_audit(task_pins=(pin,), options=options1, policy=policy)
+    manifest2, _ = plan_audit(task_pins=(pin,), options=options2, policy=policy)
+
+    # Both must NOT take sandbox_hash
+    assert manifest1.policy_hash != policy.policy_hash
+    assert manifest2.policy_hash != policy.policy_hash
+    # Changing gate_policy_file must change policy_hash
+    assert manifest1.policy_hash != manifest2.policy_hash
+    # resource_policy records sandbox policy hash
+    assert manifest1.resource_policy == policy.policy_hash

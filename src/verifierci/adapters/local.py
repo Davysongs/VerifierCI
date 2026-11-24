@@ -392,7 +392,7 @@ class LocalAdapter(TaskAdapter):
             )
         raw_reqs = list(raw_reqs)
 
-        req_files_to_load: list[str] = list(local_manifest.requirement_files)
+        all_rf_candidates: list[str] = list(local_manifest.requirement_files)
         if "requirement_files" in contract_data:
             c_rf = contract_data.get("requirement_files")
             if not isinstance(c_rf, (list, tuple)):
@@ -401,22 +401,42 @@ class LocalAdapter(TaskAdapter):
                     code=ErrorCode.VALIDATION_ERROR.value,
                 )
             for rf in c_rf:
-                rf_str = str(rf)
-                if rf_str not in req_files_to_load:
-                    req_files_to_load.append(rf_str)
+                all_rf_candidates.append(str(rf))
 
-        for rf_str in req_files_to_load:
+        seen_rf_paths: set[Path] = set()
+        deduped_rf: list[tuple[str, Path]] = []
+        for rf_str in all_rf_candidates:
             rf_path = _resolve_relative_path(root_dir, rf_str)
+            resolved_p = rf_path.resolve()
+            if resolved_p not in seen_rf_paths:
+                seen_rf_paths.add(resolved_p)
+                deduped_rf.append((rf_str, rf_path))
+
+        for rf_str, rf_path in deduped_rf:
             rf_data = _safe_load_yaml_any(rf_path)
+            entries: list[Any]
             if isinstance(rf_data, list):
-                raw_reqs.extend(rf_data)
+                entries = rf_data
             elif isinstance(rf_data, Mapping):
-                raw_reqs.append(rf_data)
+                entries = [rf_data]
             else:
                 raise ValidationError(
                     f"Requirement file {rf_str} must contain a mapping or list of mappings",
                     code=ErrorCode.VALIDATION_ERROR.value,
                 )
+            for entry in entries:
+                if not isinstance(entry, Mapping):
+                    raise ValidationError(
+                        f"Requirement file {rf_str} entries must be mappings",
+                        code=ErrorCode.VALIDATION_ERROR.value,
+                    )
+                # Preserve explicit source_locator, default to rf_str for external entries
+                if not entry.get("source_locator"):
+                    entry_dict = dict(entry)
+                    entry_dict["source_locator"] = rf_str
+                    raw_reqs.append(entry_dict)
+                else:
+                    raw_reqs.append(entry)
         requirements_list: list[Requirement] = []
         for r in raw_reqs:
             if not isinstance(r, Mapping):

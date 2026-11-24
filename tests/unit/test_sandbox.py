@@ -648,3 +648,25 @@ def test_collect_output_files_symlinked_out_dir() -> None:
 
         collected = collect_output_files(symlink_out, allowed_filenames=("*",))
         assert collected == {}
+
+
+def test_validate_patch_paths_with_spaces() -> None:
+    """Paths containing spaces in diff headers are parsed whole, not fragmented."""
+    diff_unquoted = b"""diff --git a/src/my component/app file.py b/src/my component/app file.py
+--- a/src/my component/app file.py
++++ b/src/my component/app file.py
+@@ -1 +1 @@
+-old
++new
+"""
+    # Allowed prefix is src/
+    validate_patch(diff_unquoted, allowed_paths=("src/",))
+
+    diff_quoted = b"""diff --git "a/src/my component/app file.py" "b/src/my component/app file.py"
+--- "a/src/my component/app file.py"
++++ "b/src/my component/app file.py"
+@@ -1 +1 @@
+-old
++new
+"""
+    validate_patch(diff_quoted, allowed_paths=("src/",))

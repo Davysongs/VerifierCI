@@ -343,3 +343,30 @@ def test_empty_collection_is_invalid_evaluation() -> None:
     assert outcome.outcome == "invalid_evaluation"
     assert outcome.evaluation_validity == "invalid"
     assert outcome.error_code == ErrorCode.EMPTY_COLLECTION.value
+
+
+def test_build_error_precedence_over_runtime_timeout() -> None:
+    """Tier 2 BUILD_ERROR takes precedence over Tier 3 TIMEOUT."""
+    manifest = _make_manifest()
+    cap = _make_capture(
+        runtime_error=ErrorCode.TIMEOUT.value,
+        build_exit_code=1,
+        timed_out=True,
+    )
+    outcome = parse_capture(cap, manifest)
+    assert outcome.outcome == "invalid_evaluation"
+    assert outcome.evaluation_validity == "invalid"
+    assert outcome.error_code == ErrorCode.BUILD_ERROR.value
+
+
+def test_infrastructure_error_precedence_over_build_error() -> None:
+    """Tier 1 true infrastructure error takes precedence over Tier 2 BUILD_ERROR."""
+    manifest = _make_manifest()
+    cap = _make_capture(
+        runtime_error=ErrorCode.INFRASTRUCTURE_ERROR.value,
+        build_exit_code=1,
+    )
+    outcome = parse_capture(cap, manifest)
+    assert outcome.outcome == "error"
+    assert outcome.evaluation_validity == "invalid"
+    assert outcome.error_code == ErrorCode.INFRASTRUCTURE_ERROR.value
