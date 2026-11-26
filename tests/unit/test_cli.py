@@ -703,3 +703,155 @@ def test_review_hardening_invariants(tmp_path: Path) -> None:
         raise AssertionError("Expected ProtectionError for unpinned verifier")
     except ProtectionError as exc:
         assert exc.code == ErrorCode.DIGEST_MISMATCH.value
+
+    # 4. Snapshot v2 exec-bit sensitivity, bounded manifest read, and registry hardening
+    from verifierci.adapters.local import (
+        MAX_MANIFEST_BYTES,
+        _safe_load_yaml_with_bytes,
+        hash_snapshot_directory,
+    )
+    from verifierci.execution.service import import_task_command
+    from verifierci.models.protocol import ImportRequest
+
+    snap_dir = tmp_path / "snap_exec"
+    snap_dir.mkdir()
+    script_file = snap_dir / "tool.sh"
+    script_file.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    script_file.chmod(0o644)
+    dig_no_exec = hash_snapshot_directory(snap_dir)
+    script_file.chmod(0o755)
+    dig_exec = hash_snapshot_directory(snap_dir)
+    assert dig_no_exec != dig_exec
+
+    over_yaml = tmp_path / "over_limit.yaml"
+    over_yaml.write_bytes(b"k: " + b"x" * MAX_MANIFEST_BYTES)
+    try:
+        _safe_load_yaml_with_bytes(over_yaml)
+        raise AssertionError("Expected ValidationError for oversized YAML manifest")
+    except ValidationError as exc:
+        assert exc.code == ErrorCode.ARTIFACT_LIMIT.value
+
+    # Missing task_key in recognizable fixture manifest fails closed; unrelated JSON ignored
+    bad_reg_dir = tmp_path / "manifests_bad"
+    bad_reg_dir.mkdir()
+    (bad_reg_dir / "unrelated.json").write_text('{"note": "ignore"}', encoding="utf-8")
+    (bad_reg_dir / "broken.json").write_text(
+        '{"manifest_id": "broken", "snapshot_digest": "' + ("0" * 64) + '"}',
+        encoding="utf-8",
+    )
+    try:
+        SnapshotRegistry.from_manifests_dir(bad_reg_dir)
+        raise AssertionError("Expected ValidationError for missing task_key")
+    except ValidationError:
+        pass
+
+    # Trusted witness mismatch raises DIGEST_MISMATCH
+    try:
+        reg.verify_fixture(
+            task_key=rec.task_key,
+            contract_hash=rec.contract_hash,
+            snapshot_digest=rec.snapshot_digest,
+            panel_key=rec.panel_key,
+            verifier_digests={k: v for k, v in rec.trusted_verifiers.items()},
+            case_diff_digests=dict(rec.trusted_case_diffs),
+            witness_digests={"sequences/permanent-retry-sequence.json": "0" * 64},
+        )
+        raise AssertionError("Expected ProtectionError for witness mismatch")
+    except ProtectionError as exc:
+        assert exc.code == ErrorCode.DIGEST_MISMATCH.value
+
+    # Explicit environment_id & normalized default provenance allow distinct task versions
+    db_imp = tmp_path / "env_versions.sqlite"
+    art_imp = tmp_path / "art_imp"
+    out_imp = tmp_path / "out_imp"
+    for ver, env_id, plat in (
+        ("1.0.0", "env-linux-v1", "linux/amd64"),
+        ("2.0.0", "env-arm-v2", "linux/arm64"),
+    ):
+        tdir = tmp_path / f"t_{ver}"
+        (tdir / "source").mkdir(parents=True)
+        (tdir / "source" / "app.py").write_text("x = 1\n", encoding="utf-8")
+        (tdir / "contract.yaml").write_text(
+            f"schema_version: '1.0.0'\ntask_id: multi-env\nversion: '{ver}'\nrequirements:\n  - requirement_id: R1\n    text: ok\n",
+            encoding="utf-8",
+        )
+        (tdir / "v1.yaml").write_text(
+            f"verifier_id: mv1-{ver.replace('.', '_')}\nversion: '1.0.0'\ncommand: ['true']\n",
+            encoding="utf-8",
+        )
+        (tdir / "task.yaml").write_text(
+            f"schema_version: '1.0.0'\ntask_id: multi-env\nversion: '{ver}'\ncontract: contract.yaml\nsnapshot: source/\nverifier: v1.yaml\nenvironment:\n  environment_id: {env_id}\n  backend: fixture\n  platform: {plat}\n",
+            encoding="utf-8",
+        )
+        b_res = import_task_command(
+            ImportRequest(
+                adapter="local",
+                instance="multi-env",
+                source=str(tdir / "task.yaml"),
+                source_revision=ver,
+                environment_manifest=None,
+                output_dir=str(out_imp),
+                dry_run=False,
+            ),
+            db_path=db_imp,
+            artifact_dir=art_imp,
+        )
+        assert b_res.environment.environment_id == env_id
+        assert b_res.environment.platform == plat
+
+    # Updated adjudication rationale does not mutate case-owned provenance_digest
+    p1 = tmp_path / "p_prov_1.jsonl"
+    p2 = tmp_path / "p_prov_2.jsonl"
+    base_case = {
+        "case_id": "c-same",
+        "role": "challenge",
+        "source": "human",
+        "diff": "diff --git a/x.py b/x.py\n",
+        "family_id": "fam",
+    }
+    p1.write_text(
+        json.dumps(
+            {
+                "panel_id": "prov-p",
+                "version": "1.0.0",
+                "split": "development",
+                "cases": [
+                    {
+                        **base_case,
+                        "adjudication": {
+                            "version": 1,
+                            "label": "valid",
+                            "review_status": "independent",
+                            "rationale": "first rationale",
+                        },
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    p2.write_text(
+        json.dumps(
+            {
+                "panel_id": "prov-p",
+                "version": "1.0.0",
+                "split": "development",
+                "cases": [
+                    {
+                        **base_case,
+                        "adjudication": {
+                            "version": 2,
+                            "label": "valid",
+                            "review_status": "independent",
+                            "rationale": "revised rationale",
+                        },
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert (
+        load_and_validate_panel(p1).cases[0].provenance_digest
+        == load_and_validate_panel(p2).cases[0].provenance_digest
+    )

@@ -359,9 +359,11 @@ def build_matrix(
                 )
             selected_attempt_by_job[j.job_id] = j.selected_attempt_id
 
-    # Collect planned cells from manifest pins (when case_ids are explicit) and jobs
+    # Collect planned cells from manifest pins (per-task: explicit case_ids vs derived) and jobs
     cell_keys: set[tuple[str, str, str]] = set()
     planned_job_coords: set[tuple[str, str, str, int]] = set()
+    explicit_coords_by_task: dict[str, set[tuple[str, str, str, int]]] = {}
+    pin_verifiers_by_task: dict[str, set[str]] = {}
     for pin in manifest.task_pins:
         verifiers = [
             v
@@ -370,11 +372,16 @@ def build_matrix(
             )
             if v
         ]
-        for c_id in pin.case_ids:
-            for v_key in verifiers:
-                cell_keys.add((pin.task_key, c_id, v_key))
-                for rep in range(manifest.max_repetitions):
-                    planned_job_coords.add((pin.task_key, c_id, v_key, rep))
+        pin_verifiers_by_task.setdefault(pin.task_key, set()).update(verifiers)
+        if pin.case_ids:
+            task_coords = explicit_coords_by_task.setdefault(pin.task_key, set())
+            for c_id in pin.case_ids:
+                for v_key in verifiers:
+                    cell_keys.add((pin.task_key, c_id, v_key))
+                    for rep in range(manifest.max_repetitions):
+                        coord = (pin.task_key, c_id, v_key, rep)
+                        planned_job_coords.add(coord)
+                        task_coords.add(coord)
 
     for j in jobs:
         cell_keys.add((j.task_key, j.case_id, j.verifier_key))
@@ -448,9 +455,19 @@ def build_matrix(
 
     non_terminal_jobs = [j for j in jobs if j.state not in _TERMINAL_JOB_STATES]
     missing_planned_coords = planned_job_coords - seen_job_coords
-    extra_planned_coords = (
-        seen_job_coords - planned_job_coords if planned_job_coords else set()
-    )
+    extra_planned_coords: set[tuple[str, str, str, int]] = set()
+    if pin_verifiers_by_task:
+        for coord in seen_job_coords:
+            t_key, _c_id, v_key, _rep = coord
+            if (
+                t_key not in pin_verifiers_by_task
+                or v_key not in pin_verifiers_by_task[t_key]
+            ):
+                extra_planned_coords.add(coord)
+                continue
+            explicit_coords = explicit_coords_by_task.get(t_key)
+            if explicit_coords is not None and coord not in explicit_coords:
+                extra_planned_coords.add(coord)
     if extra_planned_coords:
         raise ValidationError(
             f"Cannot finalize acceptance matrix: {len(extra_planned_coords)} job(s) "

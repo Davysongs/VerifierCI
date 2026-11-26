@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import struct
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
@@ -89,10 +90,11 @@ def _safe_load_yaml_with_bytes(path: Path) -> tuple[bytes, dict[str, Any]]:
             code=ErrorCode.ARTIFACT_LIMIT.value,
         )
 
-    raw_bytes = path.read_bytes()
+    with path.open("rb") as f:
+        raw_bytes = f.read(MAX_MANIFEST_BYTES + 1)
     if len(raw_bytes) > MAX_MANIFEST_BYTES:
         raise ValidationError(
-            f"Manifest size {len(raw_bytes)} exceeds limit of {MAX_MANIFEST_BYTES} bytes.",
+            f"Manifest size exceeds limit of {MAX_MANIFEST_BYTES} bytes.",
             code=ErrorCode.ARTIFACT_LIMIT.value,
         )
     try:
@@ -124,8 +126,11 @@ def _safe_load_yaml(path: Path) -> dict[str, Any]:
     return data
 
 
+_SNAPSHOT_DIGEST_VERSION = b"verifierci.snapshot.v2\0"
+
+
 def hash_snapshot_directory(snapshot_dir: Path) -> str:
-    """Hash a snapshot directory canonically with relative POSIX paths, rejecting symlinks."""
+    """Hash a snapshot directory canonically with length-prefixed paths, exec bits, and content digests."""
     if snapshot_dir.is_symlink() or os.path.islink(snapshot_dir):
         raise ProtectionError(
             f"Symlink rejected for snapshot root directory: {snapshot_dir}",
@@ -137,6 +142,7 @@ def hash_snapshot_directory(snapshot_dir: Path) -> str:
             code=ErrorCode.VALIDATION_ERROR.value,
         )
     hasher = hashlib.sha256()
+    hasher.update(_SNAPSHOT_DIGEST_VERSION)
     for child in sorted(snapshot_dir.rglob("*")):
         if child.is_symlink() or os.path.islink(child):
             raise ProtectionError(
@@ -144,9 +150,13 @@ def hash_snapshot_directory(snapshot_dir: Path) -> str:
                 code=ErrorCode.PROTECTION_ERROR.value,
             )
         if child.is_file():
-            rel_posix = child.relative_to(snapshot_dir).as_posix()
-            hasher.update((rel_posix + "\0").encode("utf-8"))
-            hasher.update(child.read_bytes())
+            rel_bytes = child.relative_to(snapshot_dir).as_posix().encode("utf-8")
+            is_exec = 1 if (child.stat().st_mode & 0o111) else 0
+            with child.open("rb") as cf:
+                file_digest = hashlib.file_digest(cf, "sha256").digest()
+            hasher.update(struct.pack(">IB", len(rel_bytes), is_exec))
+            hasher.update(rel_bytes)
+            hasher.update(file_digest)
     return hasher.hexdigest()
 
 
@@ -265,13 +275,19 @@ def read_local_manifest(
             f"Unsupported local manifest schema version: '{schema_version}'. Supported versions: {sorted(SUPPORTED_LOCAL_VERSIONS)}",
             code=ErrorCode.VALIDATION_ERROR.value,
         )
+    resolved_default_prov = str(path.resolve())
     task_data = data.get("task", {})
     if isinstance(task_data, dict) and task_data:
         task_id = str(task_data.get("task_id", data.get("task_id", path.stem)))
         version = str(task_data.get("version", data.get("version", "1.0.0")))
         statement = str(task_data.get("statement", data.get("statement", "")))
         licence = str(task_data.get("licence", data.get("licence", "Apache-2.0")))
-        provenance = str(task_data.get("provenance", data.get("provenance", str(path))))
+        if "provenance" in task_data and task_data["provenance"] is not None:
+            provenance = str(task_data["provenance"])
+        elif "provenance" in data and data["provenance"] is not None:
+            provenance = str(data["provenance"])
+        else:
+            provenance = resolved_default_prov
         eligibility = task_data.get("eligibility", data.get("eligibility", "eligible"))
         notes = str(task_data.get("notes", data.get("notes", "")))
     else:
@@ -279,7 +295,10 @@ def read_local_manifest(
         version = str(data.get("version", "1.0.0"))
         statement = str(data.get("statement", ""))
         licence = str(data.get("licence", "Apache-2.0"))
-        provenance = str(data.get("provenance", str(path)))
+        if "provenance" in data and data["provenance"] is not None:
+            provenance = str(data["provenance"])
+        else:
+            provenance = resolved_default_prov
         eligibility = data.get("eligibility", "eligible")
         notes = str(data.get("notes", ""))
 
@@ -759,7 +778,12 @@ class LocalAdapter(TaskAdapter):
                 f"Unsupported environment backend: '{backend}'.",
                 code=ErrorCode.VALIDATION_ERROR.value,
             )
-        environment_id = f"{local_manifest.task.task_id}-env"
+        raw_env_id = env_raw_data.get("environment_id")
+        environment_id = (
+            str(raw_env_id).strip()
+            if isinstance(raw_env_id, str) and raw_env_id.strip()
+            else f"{local_manifest.task.task_id}-env"
+        )
         environment = Environment(
             environment_id=environment_id,
             backend=backend,

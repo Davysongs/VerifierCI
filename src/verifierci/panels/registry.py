@@ -11,7 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, cast
@@ -50,6 +50,7 @@ class PanelValidationResult:
     case_diffs: dict[str, bytes]
     findings: tuple[str, ...]
     valid: bool
+    witness_digests: dict[str, str] = field(default_factory=dict)
 
 
 def _resolve_panel_artifact(root_dir: Path, rel_path_str: str) -> Path:
@@ -247,6 +248,7 @@ def load_and_validate_panel(
     adjudications: list[Adjudication] = []
     memberships: list[PatchPanelMembership] = []
     case_diffs: dict[str, bytes] = {}
+    witness_digests: dict[str, str] = {}
     seen_case_ids: set[str] = set()
 
     effective_task_key = task_key or str(header.get("task_key", "unknown@1.0.0"))
@@ -385,12 +387,18 @@ def load_and_validate_panel(
                             code=ErrorCode.ARTIFACT_LIMIT.value,
                         )
                     try:
-                        diff_bytes = diff_path.read_bytes()
+                        with diff_path.open("rb") as df:
+                            diff_bytes = df.read(MAX_PANEL_BYTES + 1)
                     except OSError as exc:
                         raise InfrastructureError(
                             f"Failed to read diff artifact '{diff_field}' for case '{case_id}': {exc}",
                             code=ErrorCode.INFRASTRUCTURE_ERROR.value,
                         ) from exc
+                    if len(diff_bytes) > MAX_PANEL_BYTES:
+                        raise ValidationError(
+                            f"Diff artifact '{diff_field}' exceeds limit of {MAX_PANEL_BYTES} bytes.",
+                            code=ErrorCode.ARTIFACT_LIMIT.value,
+                        )
                 elif verify_artifacts:
                     raise InfrastructureError(
                         f"Missing diff artifact '{diff_field}' referenced by case '{case_id}'.",
@@ -420,15 +428,27 @@ def load_and_validate_panel(
                             f"Witness artifact '{witness_ref}' exceeds limit of {MAX_PANEL_BYTES} bytes.",
                             code=ErrorCode.ARTIFACT_LIMIT.value,
                         )
+                    total_witness_bytes = 0
+                    witness_hasher = hashlib.sha256()
                     try:
                         with w_path.open("rb") as wf:
-                            while wf.read(65536):
-                                pass
+                            while True:
+                                chunk = wf.read(65536)
+                                if not chunk:
+                                    break
+                                total_witness_bytes += len(chunk)
+                                if total_witness_bytes > MAX_PANEL_BYTES:
+                                    raise ValidationError(
+                                        f"Witness artifact '{witness_ref}' exceeds limit of {MAX_PANEL_BYTES} bytes.",
+                                        code=ErrorCode.ARTIFACT_LIMIT.value,
+                                    )
+                                witness_hasher.update(chunk)
                     except OSError as exc:
                         raise InfrastructureError(
                             f"Failed to read witness artifact '{witness_ref}' for case '{case_id}': {exc}",
                             code=ErrorCode.INFRASTRUCTURE_ERROR.value,
                         ) from exc
+                    witness_digests[witness_ref] = witness_hasher.hexdigest()
                 elif verify_artifacts:
                     raise InfrastructureError(
                         f"Missing witness artifact '{witness_ref}' referenced by case '{case_id}'.",
@@ -463,8 +483,13 @@ def load_and_validate_panel(
             if isinstance(declared_case_task, str)
             else effective_task_key
         )
+        case_owned = {
+            k: v
+            for k, v in raw_c.items()
+            if k not in ("adjudication", "expected_control_outcomes")
+        }
         prov_digest = hashlib.sha256(
-            json.dumps(raw_c, sort_keys=True).encode("utf-8")
+            json.dumps(case_owned, sort_keys=True).encode("utf-8")
         ).hexdigest()
 
         case_obj = PatchCase(
@@ -572,6 +597,7 @@ def load_and_validate_panel(
         case_diffs=case_diffs,
         findings=tuple(findings),
         valid=True,
+        witness_digests=witness_digests,
     )
 
 

@@ -122,25 +122,37 @@ def validate_matrix(matrix: AcceptanceMatrix, manifest: AuditManifest) -> None:
         raise ValidationError(
             f"Matrix run_id '{matrix.run_id}' does not match manifest run_id '{manifest.run_id}'."
         )
-    allowed_cells: set[tuple[str, str, str]] = set()
+    explicit_cells_by_task: dict[str, set[tuple[str, str, str]]] = {}
+    pin_verifiers_by_task: dict[str, set[str]] = {}
     for pin in manifest.task_pins:
-        verifiers = tuple(
+        verifiers = {
             v
-            for v in dict.fromkeys(
-                (pin.verifier_baseline_version, pin.verifier_candidate_version)
-            )
+            for v in (pin.verifier_baseline_version, pin.verifier_candidate_version)
             if v
-        )
-        for cid in pin.case_ids:
-            for vk in verifiers:
-                allowed_cells.add((pin.task_key, cid, vk))
-    if allowed_cells:
+        }
+        pin_verifiers_by_task.setdefault(pin.task_key, set()).update(verifiers)
+        if pin.case_ids:
+            task_cells = explicit_cells_by_task.setdefault(pin.task_key, set())
+            for cid in pin.case_ids:
+                for vk in verifiers:
+                    task_cells.add((pin.task_key, cid, vk))
+    if pin_verifiers_by_task:
         for cell in matrix.cells:
-            coord = (cell.task_key, cell.case_id, cell.verifier_key)
-            if coord not in allowed_cells:
+            if cell.task_key not in pin_verifiers_by_task:
                 raise ValidationError(
-                    f"AcceptanceMatrix contains unplanned cell coordinate {coord}."
+                    f"AcceptanceMatrix contains unplanned task_key '{cell.task_key}'."
                 )
+            if cell.verifier_key not in pin_verifiers_by_task[cell.task_key]:
+                raise ValidationError(
+                    f"AcceptanceMatrix contains unplanned verifier '{cell.verifier_key}' for task '{cell.task_key}'."
+                )
+            explicit_cells = explicit_cells_by_task.get(cell.task_key)
+            if explicit_cells is not None:
+                coord = (cell.task_key, cell.case_id, cell.verifier_key)
+                if coord not in explicit_cells:
+                    raise ValidationError(
+                        f"AcceptanceMatrix contains unplanned cell coordinate {coord}."
+                    )
 
 
 @dataclass(frozen=True, slots=True)

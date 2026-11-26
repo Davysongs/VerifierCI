@@ -6,7 +6,7 @@
   "task_key": "retry-contract@1.0.0",
   "panel_key": "retry-contract-panel@1.0.0",
   "contract_hash": "bba8c620c54093715e6eb108a9d41e77b0592f59b4d6f4b6a8bb60cece2dd36e",
-  "snapshot_digest": "2dd2b4eca0886bb37cb8b36cc82e69a4959f0d8cde734ca62462874151b27605",
+  "snapshot_digest": "44047fea267d2e1a124b1fcdcb28953c73d7cd425fa53291276c04b26144b1fc",
   "commit_oid": "synthetic-fixture-no-upstream-commit",
   "archive_uri": "examples/retry-contract/source/",
   "environment_id": "cpython-3.12-fixture-v1",

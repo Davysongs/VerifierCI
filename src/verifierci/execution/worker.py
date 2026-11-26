@@ -33,6 +33,7 @@ from verifierci.errors import (
     ErrorCode,
     InfrastructureError,
     LeaseLost,
+    ProtectionError,
     ValidationError,
     VerifierCIError,
 )
@@ -107,7 +108,11 @@ class Worker:
         self.lease_duration_ms = lease_duration_ms
         self.heartbeat_interval_seconds = heartbeat_interval_seconds
         self.clock = clock or (lambda: int(time.time() * 1000))
-        self.expected_snapshot_digests = dict(expected_snapshot_digests or {})
+        self.expected_snapshot_digests: dict[str, str] | None = (
+            dict(expected_snapshot_digests)
+            if expected_snapshot_digests is not None
+            else None
+        )
 
     def _resolve_snapshot(self, task_key: str, conn: sqlite3.Connection) -> Path:
         p: Path
@@ -301,9 +306,16 @@ class Worker:
                 hb_thread = threading.Thread(target=_heartbeat_worker, daemon=True)
                 hb_thread.start()
 
-                expected_snap_digest = self.expected_snapshot_digests.get(
-                    current_job.task_key
-                )
+                expected_snap_digest: str | None = None
+                if self.expected_snapshot_digests is not None:
+                    if current_job.task_key not in self.expected_snapshot_digests:
+                        raise ProtectionError(
+                            f"Pinned worker refused unpinned task '{current_job.task_key}'.",
+                            code=ErrorCode.DIGEST_MISMATCH.value,
+                        )
+                    expected_snap_digest = self.expected_snapshot_digests[
+                        current_job.task_key
+                    ]
                 attempt_dir = prepare_workspace(
                     job=current_job,
                     snapshot_dir=snapshot_dir,
@@ -762,7 +774,10 @@ class Worker:
         count = 0
         for _ in range(max_iterations):
             claimed = self.run_one(conn, run_id=run_id)
-            if not claimed:
+            if claimed:
+                count += 1
+                continue
+            reaped = jobs.reap_expired(conn, now_ms=self.clock())
+            if not reaped:
                 break
-            count += 1
         return count

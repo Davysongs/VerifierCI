@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import sqlite3
 import tempfile
 from datetime import UTC, datetime
@@ -26,6 +27,7 @@ from verifierci.errors import (
     InfrastructureError,
     ProtectionError,
     ValidationError,
+    VerifierCIError,
 )
 from verifierci.execution.matrix import build_matrix
 from verifierci.execution.planner import plan_audit
@@ -47,6 +49,112 @@ from verifierci.reports.render import render_json, render_summary
 from verifierci.snapshots.registry import SnapshotRegistry
 from verifierci.storage.artifacts import ArtifactStore, register_artifact
 from verifierci.storage.db import connect, migrate, transaction
+
+
+def _validate_target_file(destination: Path) -> None:
+    """Ensure target path and its non-existent ancestors contain no symlinks or directories."""
+    if destination.is_symlink() or os.path.islink(destination):
+        raise ProtectionError(
+            f"Refusing to write through symlink destination: {destination}",
+            code=ErrorCode.PROTECTION_ERROR.value,
+        )
+    if destination.exists() and destination.is_dir():
+        raise ValidationError(
+            f"Destination path is a directory: {destination}",
+            code=ErrorCode.VALIDATION_ERROR.value,
+        )
+
+
+def _atomic_publish_group(
+    target_dir: Path, staged_outputs: list[tuple[str, str]]
+) -> dict[str, str]:
+    """Validate, stage, and atomically swap a group of files in target_dir.
+
+    Backs up overwritten targets before replacing so partial failure restores
+    the previous on-disk state. Cleans all temp/backup files in finally.
+    """
+    for filename, _ in staged_outputs:
+        _validate_target_file(target_dir / filename)
+
+    tmp_files: list[tuple[Path, Path]] = []
+    backups: list[tuple[Path, Path | None]] = []
+    try:
+        target_dir.mkdir(parents=True, exist_ok=True)
+        for filename, content in staged_outputs:
+            dest = target_dir / filename
+            _validate_target_file(dest)
+            fd, tmp_str = tempfile.mkstemp(
+                dir=target_dir, prefix=f".{filename}.", suffix=".tmp"
+            )
+            tmp_path = Path(tmp_str)
+            tmp_files.append((tmp_path, dest))
+            try:
+                f = os.fdopen(fd, "w", encoding="utf-8")
+            except Exception:
+                os.close(fd)
+                raise
+            with f:
+                f.write(content)
+                f.flush()
+                os.fsync(f.fileno())
+
+        # Move existing targets aside into temporary backups before publishing
+        for _tmp_path, dest in tmp_files:
+            if dest.exists():
+                bak_fd, bak_str = tempfile.mkstemp(
+                    dir=target_dir, prefix=f".{dest.name}.", suffix=".bak"
+                )
+                os.close(bak_fd)
+                bak_path = Path(bak_str)
+                os.replace(dest, bak_path)
+                backups.append((dest, bak_path))
+            else:
+                backups.append((dest, None))
+
+        # Promote staged temp files into final destinations
+        for tmp_path, dest in tmp_files:
+            os.replace(tmp_path, dest)
+
+        digests = {
+            filename: hashlib.sha256(content.encode("utf-8")).hexdigest()
+            for filename, content in staged_outputs
+        }
+        # Publication succeeded; remove backups
+        for _dest, saved_bak in backups:
+            if saved_bak is not None and saved_bak.exists():
+                saved_bak.unlink(missing_ok=True)
+        backups.clear()
+        return digests
+    except VerifierCIError:
+        for dest, saved_bak in reversed(backups):
+            try:
+                if saved_bak is not None and saved_bak.exists():
+                    os.replace(saved_bak, dest)
+                elif dest.exists():
+                    dest.unlink(missing_ok=True)
+            except OSError:
+                pass
+        raise
+    except OSError as exc:
+        for dest, saved_bak in reversed(backups):
+            try:
+                if saved_bak is not None and saved_bak.exists():
+                    os.replace(saved_bak, dest)
+                elif dest.exists():
+                    dest.unlink(missing_ok=True)
+            except OSError:
+                pass
+        raise InfrastructureError(
+            f"Failed to publish outputs in {target_dir}: {exc}",
+            code=ErrorCode.INFRASTRUCTURE_ERROR.value,
+        ) from exc
+    finally:
+        for tmp_path, _ in tmp_files:
+            if tmp_path.exists():
+                tmp_path.unlink(missing_ok=True)
+        for _dest, saved_bak in backups:
+            if saved_bak is not None and saved_bak.exists():
+                saved_bak.unlink(missing_ok=True)
 
 
 def _atomic_write_text(destination: Path, text: str) -> None:
@@ -491,7 +599,8 @@ def import_task_command(
         ),
     ]
 
-    # Persist to SQLite FIRST so conflicts never overwrite accepted outputs
+    # Persist to SQLite and atomically publish outputs inside the same transaction
+    # so any staging or replacement failure rolls back the DB commit too.
     conn = connect(db_path)
     try:
         migrate(conn, backup=False)
@@ -500,12 +609,9 @@ def import_task_command(
             _persist_bundle_records(
                 conn, artifact_store, bundle, verifier_payload_bytes=verifier_bytes
             )
+            _atomic_publish_group(target_dir, staged_outputs)
     finally:
         conn.close()
-
-    # Publish normalized outputs atomically only after DB transaction committed
-    for filename, content in staged_outputs:
-        _atomic_write_text(target_dir / filename, content)
 
     return bundle
 
@@ -731,7 +837,19 @@ def execute_audit_pipeline(
             ),
         },
         case_diff_digests={c.case_id: c.diff_digest for c in panel_res.cases},
+        witness_digests=panel_res.witness_digests,
     )
+
+    registered_fixture = registry.get(primary_bundle.task.task_key)
+    if (
+        registered_fixture is not None
+        and registered_fixture.diagnostic_only
+        and not options.diagnostic
+    ):
+        raise ProtectionError(
+            f"Trusted fixture '{registered_fixture.manifest_id}' is marked diagnostic_only and requires --diagnostic.",
+            code=ErrorCode.PROTECTION_ERROR.value,
+        )
 
     has_provisional = any(
         adj.review_status == "provisional" for adj in panel_res.adjudications
@@ -1109,6 +1227,12 @@ def execute_audit_pipeline(
         )
 
         db_jobs, db_attempts = _load_jobs_and_attempts(conn, manifest.run_id)
+        non_terminal = [j for j in db_jobs if j.state not in ("DONE", "FAILED")]
+        if non_terminal:
+            raise InfrastructureError(
+                f"Cannot finalize audit run '{manifest.run_id}': {len(non_terminal)} job(s) remain non-terminal.",
+                code=ErrorCode.INFRASTRUCTURE_ERROR.value,
+            )
         adjs_map = {a.case_id: a for a in panel_res.adjudications}
         cases_map = {c.case_id: c for c in panel_res.cases}
         repository_map = {
@@ -1123,8 +1247,13 @@ def execute_audit_pipeline(
             cases_map,
             repository_map,
         )
+        if not matrix.complete:
+            raise ValidationError(
+                f"Cannot publish outputs for incomplete audit matrix '{manifest.run_id}'.",
+                code=ErrorCode.VALIDATION_ERROR.value,
+            )
 
-        # Collect only artifacts referenced by this run
+        # Collect only artifacts referenced by this run (chunked for SQLite parameter limits)
         run_artifact_digests: set[str] = {
             baseline_manifest.payload_digest,
             candidate_manifest.payload_digest,
@@ -1147,14 +1276,18 @@ def execute_audit_pipeline(
                     run_artifact_digests.add(ad)
 
         sorted_digests = sorted(run_artifact_digests)
-        if sorted_digests:
-            placeholders = ",".join("?" for _ in sorted_digests)
-            art_rows = conn.execute(
-                f"SELECT * FROM artifacts WHERE digest IN ({placeholders}) ORDER BY digest ASC",
-                tuple(sorted_digests),
-            ).fetchall()
-        else:
-            art_rows = []
+        art_rows_list: list[sqlite3.Row] = []
+        chunk_size = 500
+        for idx in range(0, len(sorted_digests), chunk_size):
+            chunk = sorted_digests[idx : idx + chunk_size]
+            placeholders = ",".join("?" for _ in chunk)
+            art_rows_list.extend(
+                conn.execute(
+                    f"SELECT * FROM artifacts WHERE digest IN ({placeholders})",
+                    tuple(chunk),
+                ).fetchall()
+            )
+        art_rows = sorted(art_rows_list, key=lambda r: str(r["digest"]))
         artifacts = tuple(
             Artifact(
                 digest=r["digest"],
@@ -1181,54 +1314,55 @@ def execute_audit_pipeline(
             artifacts=artifacts,
         )
 
-        # Stage all three run outputs in a run-specific staging directory first,
-        # promote them atomically, and publish COMPLETE.json boundary last.
+        # Render into a staging workspace (cleaned in finally), materialize an
+        # immutable run-specific generation under runs/<run_id>/, promote
+        # top-level outputs atomically with rollback protection, and atomically
+        # switch COMPLETE.json last to reference that generation.
         stage_dir = out_dir / ".staging" / manifest.run_id
-        stage_dir.mkdir(parents=True, exist_ok=True)
-        staged_report = stage_dir / "report.json"
-        staged_summary = stage_dir / "summary.txt"
-        staged_manifest = stage_dir / "manifest.json"
-
-        render_json(result, staged_report)
-        summary_text = render_summary(result) + "\n"
-        _atomic_write_text(staged_summary, summary_text)
-        manifest_text = (
-            json.dumps(
-                {
-                    "schema_version": "1.0.0",
-                    "kind": "AuditManifest",
-                    "data": canonical_repr(manifest),
-                },
-                indent=2,
-                sort_keys=True,
+        gen_rel = f"runs/{manifest.run_id}"
+        gen_dir = out_dir / "runs" / manifest.run_id
+        try:
+            stage_dir.mkdir(parents=True, exist_ok=True)
+            staged_report = stage_dir / "report.json"
+            render_json(result, staged_report)
+            report_text = staged_report.read_text(encoding="utf-8")
+            summary_text = render_summary(result) + "\n"
+            manifest_text = (
+                json.dumps(
+                    {
+                        "schema_version": "1.0.0",
+                        "kind": "AuditManifest",
+                        "data": canonical_repr(manifest),
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n"
             )
-            + "\n"
-        )
-        _atomic_write_text(staged_manifest, manifest_text)
 
-        report_bytes = staged_report.read_bytes()
-        summary_bytes = staged_summary.read_bytes()
-        manifest_bytes = staged_manifest.read_bytes()
+            run_files = [
+                ("report.json", report_text),
+                ("summary.txt", summary_text),
+                ("manifest.json", manifest_text),
+            ]
+            file_digests = _atomic_publish_group(gen_dir, run_files)
+            _atomic_publish_group(out_dir, run_files)
 
-        render_json(result, out_dir / "report.json")
-        _atomic_write_text(out_dir / "summary.txt", summary_text)
-        _atomic_write_text(out_dir / "manifest.json", manifest_text)
+            boundary = {
+                "schema_version": "1.0.0",
+                "kind": "AuditOutputComplete",
+                "run_id": manifest.run_id,
+                "generation": gen_rel,
+                "matrix_id": matrix.matrix_id,
+                "files": file_digests,
+            }
+            _atomic_write_text(
+                out_dir / "COMPLETE.json",
+                json.dumps(boundary, indent=2, sort_keys=True) + "\n",
+            )
+        finally:
+            shutil.rmtree(stage_dir, ignore_errors=True)
 
-        boundary = {
-            "schema_version": "1.0.0",
-            "kind": "AuditOutputComplete",
-            "run_id": manifest.run_id,
-            "matrix_id": matrix.matrix_id,
-            "files": {
-                "report.json": hashlib.sha256(report_bytes).hexdigest(),
-                "summary.txt": hashlib.sha256(summary_bytes).hexdigest(),
-                "manifest.json": hashlib.sha256(manifest_bytes).hexdigest(),
-            },
-        }
-        _atomic_write_text(
-            out_dir / "COMPLETE.json",
-            json.dumps(boundary, indent=2, sort_keys=True) + "\n",
-        )
         return result
     finally:
         conn.close()

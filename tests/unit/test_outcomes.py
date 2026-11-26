@@ -397,3 +397,17 @@ def test_runtime_diagnostics_preserve_typed_invalid_outcome(
     assert result.error_code == runtime_error.value
     assert result.report is None
     assert result.evidence_digests == ("out_hash_1", "rep_hash_1")
+
+
+def test_digest_mismatch_propagates_as_error_not_verdict() -> None:
+    capture = _make_capture(
+        runtime_error=f"{ErrorCode.DIGEST_MISMATCH.value}: snapshot patch mismatch",
+        stderr_hash=None,
+    )
+    report = {"tests": [{"nodeid": "tests/test.py::test_pass", "outcome": "passed"}]}
+    result = parse_capture(capture, _make_manifest(), json.dumps(report).encode())
+
+    assert result.outcome == "error"
+    assert result.evaluation_validity == "invalid"
+    assert result.error_code == ErrorCode.DIGEST_MISMATCH.value
+    assert result.report is None

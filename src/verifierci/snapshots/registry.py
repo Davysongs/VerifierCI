@@ -9,13 +9,27 @@ from __future__ import annotations
 import json
 import os
 import re
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from verifierci.errors import ErrorCode, ProtectionError, ValidationError
 
 _SHA256_HEX_RE = re.compile(r"^[0-9a-f]{64}$")
+_FIXTURE_DISCRIMINATOR_KEYS = frozenset(
+    {
+        "manifest_id",
+        "task_id",
+        "task_key",
+        "panel_key",
+        "contract_hash",
+        "snapshot_digest",
+        "trusted_verifiers",
+        "trusted_case_diffs",
+        "trusted_witnesses",
+    }
+)
 
 
 def _require_sha256_hex(value: Any, *, field: str, source: Path) -> str:
@@ -40,18 +54,28 @@ class TrustedFixtureRecord:
         str, tuple[str, str]
     ]  # verifier_key -> (payload_digest, manifest_hash)
     trusted_case_diffs: dict[str, str]  # case_id -> diff_digest
+    trusted_witnesses: dict[str, str] = field(default_factory=dict)  # ref -> sha256
     synthetic: bool = True
     review_status: str = "provisional"
+    diagnostic_only: bool = False
 
 
 def _default_manifests_dir() -> Path | None:
-    """Locate trusted fixture manifests in checkout datasets/ or packaged data."""
+    """Locate packaged fixture manifests by default, using verified checkout pins only inside repo checkout."""
     here = Path(__file__).resolve()
-    for parent in here.parents:
-        candidate = parent / "datasets" / "manifests"
-        if candidate.is_dir():
-            return candidate
     packaged = here.parent / "manifests"
+    if len(here.parents) > 3:
+        checkout_root = here.parents[3]
+        expected_self = (
+            checkout_root / "src" / "verifierci" / "snapshots" / "registry.py"
+        )
+        checkout_manifests = checkout_root / "datasets" / "manifests"
+        if (
+            here == expected_self
+            and (checkout_root / "pyproject.toml").is_file()
+            and checkout_manifests.is_dir()
+        ):
+            return checkout_manifests
     if packaged.is_dir():
         return packaged
     return None
@@ -88,7 +112,10 @@ class SnapshotRegistry:
                     f"Malformed fixture manifest {path}: {exc}",
                     code=ErrorCode.VALIDATION_ERROR.value,
                 ) from exc
-            if not isinstance(raw, dict) or "task_key" not in raw:
+            if not isinstance(raw, dict):
+                continue
+            # Ignore unrelated non-fixture JSON artifacts, but reject incomplete fixture manifests
+            if not any(k in raw for k in _FIXTURE_DISCRIMINATOR_KEYS):
                 continue
 
             task_key = raw.get("task_key")
@@ -153,6 +180,24 @@ class SnapshotRegistry:
                     d_hash, field=f"trusted_case_diffs.{cid}", source=path
                 )
 
+            witnesses: dict[str, str] = {}
+            raw_witnesses = raw.get("trusted_witnesses")
+            if raw_witnesses is not None:
+                if not isinstance(raw_witnesses, dict):
+                    raise ValidationError(
+                        f"Fixture manifest {path} 'trusted_witnesses' must be a mapping.",
+                        code=ErrorCode.VALIDATION_ERROR.value,
+                    )
+                for w_ref, w_hash in raw_witnesses.items():
+                    if not isinstance(w_ref, str) or not w_ref:
+                        raise ValidationError(
+                            f"Fixture manifest {path} contains invalid witness key in 'trusted_witnesses'.",
+                            code=ErrorCode.VALIDATION_ERROR.value,
+                        )
+                    witnesses[w_ref] = _require_sha256_hex(
+                        w_hash, field=f"trusted_witnesses.{w_ref}", source=path
+                    )
+
             record = TrustedFixtureRecord(
                 manifest_id=str(raw.get("manifest_id", path.stem)),
                 task_key=task_key,
@@ -161,9 +206,16 @@ class SnapshotRegistry:
                 snapshot_digest=snapshot_digest,
                 trusted_verifiers=verifiers,
                 trusted_case_diffs=diffs,
+                trusted_witnesses=witnesses,
                 synthetic=bool(raw.get("synthetic", True)),
                 review_status=str(raw.get("review_status", "provisional")),
+                diagnostic_only=bool(raw.get("diagnostic_only", False)),
             )
+            if registry.get(task_key) is not None:
+                raise ValidationError(
+                    f"Duplicate trusted fixture manifest for task_key '{task_key}' at {path}.",
+                    code=ErrorCode.VALIDATION_ERROR.value,
+                )
             registry.register(record)
 
         return registry
@@ -185,11 +237,12 @@ class SnapshotRegistry:
         panel_key: str,
         verifier_digests: dict[str, tuple[str, str]],
         case_diff_digests: dict[str, str],
+        witness_digests: Mapping[str, str] | None = None,
     ) -> list[str]:
         """Verify digests if task_key is registered; return diagnostic messages.
 
         Raises ProtectionError (DIGEST_MISMATCH) if a registered fixture's panel,
-        contract, snapshot, verifiers, or case diffs do not match pinned digests.
+        contract, snapshot, verifiers, case diffs, or witnesses do not match pins.
         """
         record = self.get(task_key)
         if record is None:
@@ -254,9 +307,27 @@ class SnapshotRegistry:
                     code=ErrorCode.DIGEST_MISMATCH.value,
                 )
 
+        if record.trusted_witnesses:
+            supplied_witnesses = dict(witness_digests or {})
+            if set(supplied_witnesses.keys()) != set(record.trusted_witnesses.keys()):
+                raise ProtectionError(
+                    f"Trusted fixture witness set mismatch for '{task_key}': "
+                    f"expected {sorted(record.trusted_witnesses)}, got {sorted(supplied_witnesses)}.",
+                    code=ErrorCode.DIGEST_MISMATCH.value,
+                )
+            for w_ref, w_dig in supplied_witnesses.items():
+                exp_w = record.trusted_witnesses[w_ref]
+                if w_dig != exp_w:
+                    raise ProtectionError(
+                        f"Trusted fixture witness digest mismatch for '{w_ref}': "
+                        f"expected {exp_w}, got {w_dig}.",
+                        code=ErrorCode.DIGEST_MISMATCH.value,
+                    )
+
         return [
             (
                 f"Verified trusted fixture digests against '{record.manifest_id}' "
-                f"(synthetic={record.synthetic}, review_status={record.review_status})."
+                f"(synthetic={record.synthetic}, review_status={record.review_status}, "
+                f"diagnostic_only={record.diagnostic_only})."
             )
         ]
