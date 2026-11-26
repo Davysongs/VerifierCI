@@ -18,14 +18,14 @@ from datetime import UTC, datetime
 
 import pytest
 
-from verifierci.errors import IdentityConflict
+from verifierci.errors import ErrorCode, IdentityConflict, ValidationError
 from verifierci.execution.matrix import (
     AcceptanceMatrixBuilder,
     aggregate_cell,
     build_matrix,
 )
 from verifierci.models.panel import Adjudication, PatchCase
-from verifierci.models.protocol import Job, ResourceUsage
+from verifierci.models.protocol import Job, ResourceUsage, TaskPin
 from verifierci.models.result import AcceptanceMatrix, AuditManifest, EvaluationAttempt
 
 
@@ -712,3 +712,694 @@ def test_aggregate_cell_deterministic_attempt_selection_order() -> None:
     assert cell.selected_attempt_ids == ("att_new",)
     assert cell.repetition_outcomes == ("accept",)
     assert "att_old" in cell.excluded_attempt_ids
+
+
+def test_aggregate_cell_flaky_with_execution_error() -> None:
+    """SDD Section 8.4: accept + reject + error -> flaky with execution-error flag."""
+    attempts = [
+        _make_attempt("a0", "j0", "accept", "valid"),
+        _make_attempt("a1", "j1", "reject", "valid"),
+        _make_attempt("a2", "j2", "error", "invalid", error_code="CRASH"),
+    ]
+    cell = aggregate_cell(
+        task_key="task-1",
+        repository_id="repo-1",
+        case_id="case-1",
+        verifier_key="v-1",
+        adjudication_id="adj-1",
+        label="valid",
+        role="challenge",
+        planned_repetitions=3,
+        attempts=attempts,
+        job_repetition_map={"j0": 0, "j1": 1, "j2": 2},
+    )
+    assert cell.outcome == "flaky"
+    assert cell.evaluation_validity == "invalid"
+    assert "FLAKY" in cell.diagnostic_codes
+    assert "execution_error" in cell.diagnostic_codes
+    assert "CRASH" in cell.diagnostic_codes
+
+
+def test_aggregate_cell_active_attempt_not_selected_as_terminal() -> None:
+    """An active in-flight attempt must remain pending and not enter selected_attempt_ids."""
+    att_active = _make_attempt("a_act", "j0", None, "pending", disposition="active")
+    cell = aggregate_cell(
+        task_key="task-1",
+        repository_id="repo-1",
+        case_id="case-1",
+        verifier_key="v-1",
+        adjudication_id="adj-1",
+        label="valid",
+        role="challenge",
+        planned_repetitions=1,
+        attempts=[att_active],
+        job_repetition_map={"j0": 0},
+    )
+    assert cell.selected_attempt_ids == ()
+    assert cell.repetition_outcomes == ("pending",)
+    assert "INCOMPLETE_REPETITIONS" in cell.diagnostic_codes
+
+
+@pytest.mark.parametrize(
+    "pending_state",
+    ["PENDING", "CLAIMED", "RUNNING", "ABANDONED"],
+)
+def test_build_matrix_refuses_finalization_with_pending_jobs(
+    pending_state: str,
+) -> None:
+    """SDD Section 2.2 & 4.1: Refuse finalization if any planned job remains non-terminal."""
+    manifest = _make_manifest(max_repetitions=2)
+    j0 = Job(
+        job_id="j0",
+        run_id="run-1",
+        task_key="task-1",
+        case_id="case-1",
+        verifier_key="v-1",
+        repetition=0,
+        state="DONE",
+        fence=1,
+        attempt_id="a0",
+        lease_token=None,
+        worker_id=None,
+        lease_expires_ms=None,
+        attempts_started=1,
+        selected_attempt_id="a0",
+        terminal_reason=None,
+    )
+    j1 = Job(
+        job_id="j1",
+        run_id="run-1",
+        task_key="task-1",
+        case_id="case-1",
+        verifier_key="v-1",
+        repetition=1,
+        state=pending_state,  # type: ignore[arg-type]
+        fence=1 if pending_state != "PENDING" else 0,
+        attempt_id="a1" if pending_state != "PENDING" else None,
+        lease_token=None,
+        worker_id=None,
+        lease_expires_ms=None,
+        attempts_started=1 if pending_state != "PENDING" else 0,
+        selected_attempt_id=None,
+        terminal_reason=None,
+    )
+    att0 = _make_attempt("a0", "j0", "accept", "valid")
+
+    with pytest.raises(
+        ValidationError, match="Cannot finalize acceptance matrix"
+    ) as exc:
+        build_matrix(manifest, [j0, j1], [att0])
+    assert exc.value.code == ErrorCode.VALIDATION_ERROR.value
+
+    # Explicit provisional=True succeeds with complete=False
+    provisional_matrix = build_matrix(manifest, [j0, j1], [att0], provisional=True)
+    assert provisional_matrix.complete is False
+    assert len(provisional_matrix.cells) == 1
+    assert provisional_matrix.cells[0].repetition_outcomes == ("accept", "pending")
+    assert "INCOMPLETE_REPETITIONS" in provisional_matrix.cells[0].diagnostic_codes
+
+
+def test_build_matrix_refuses_finalization_when_planned_pin_jobs_missing() -> None:
+    """Refuse finalization if manifest task_pins expect jobs not present in queue."""
+    pin = TaskPin(
+        task_key="task-1",
+        task_version="1.0",
+        contract_hash="c" * 64,
+        repository_snapshot_digest="s" * 64,
+        environment_id="env1",
+        environment_image_digest=None,
+        verifier_baseline_version="v-1",
+        verifier_candidate_version="v-2",
+        baseline_manifest_hash="b" * 64,
+        candidate_manifest_hash="d" * 64,
+        case_ids=("case-1",),
+    )
+    manifest = AuditManifest(
+        manifest_hash="mhash" + "0" * 59,
+        run_id="run-1",
+        benchmark_version="v1",
+        task_pins=(pin,),
+        panel_key="panel@1.0",
+        adjudication_version="adj-v1",
+        evaluation_harness_version="harn-v1",
+        config_hash="conf1" + "0" * 59,
+        policy_hash="pol1" + "0" * 60,
+        analysis_plan_hash=None,
+        timestamp=datetime.now(UTC),
+        host_fingerprint="arm64",
+        seed=42,
+        agent_version=None,
+        model_identifier=None,
+        max_repetitions=1,
+        max_attempts_per_job=3,
+        timeout_seconds=120,
+        resource_policy="res1" + "0" * 60,
+        expansion_digest="exp1" + "0" * 60,
+        parent_run_id=None,
+    )
+    # Only supply v-1 job; v-2 job is missing
+    j_v1 = Job(
+        job_id="j1",
+        run_id="run-1",
+        task_key="task-1",
+        case_id="case-1",
+        verifier_key="v-1",
+        repetition=0,
+        state="DONE",
+        fence=1,
+        attempt_id="a1",
+        lease_token=None,
+        worker_id=None,
+        lease_expires_ms=None,
+        attempts_started=1,
+        selected_attempt_id="a1",
+        terminal_reason=None,
+    )
+    att = _make_attempt("a1", "j1", "accept", "valid")
+
+    with pytest.raises(ValidationError, match="missing from execution queue"):
+        build_matrix(manifest, [j_v1], [att])
+
+    prov = build_matrix(manifest, [j_v1], [att], provisional=True)
+    assert prov.complete is False
+    assert len(prov.cells) == 2
+    assert prov.cells[1].verifier_key == "v-2"
+    assert "INCOMPLETE_REPETITIONS" in prov.cells[1].diagnostic_codes
+
+
+def test_build_matrix_fenced_selected_attempt_validation() -> None:
+    """Verify job.selected_attempt_id fencing checks and conflict detection."""
+    manifest = _make_manifest(max_repetitions=1)
+    job = Job(
+        job_id="j1",
+        run_id="run-1",
+        task_key="task-1",
+        case_id="case-1",
+        verifier_key="v-1",
+        repetition=0,
+        state="DONE",
+        fence=2,
+        attempt_id="a_sel",
+        lease_token=None,
+        worker_id=None,
+        lease_expires_ms=None,
+        attempts_started=2,
+        selected_attempt_id="a_sel",
+        terminal_reason=None,
+    )
+
+    # Missing selected attempt -> IdentityConflict
+    with pytest.raises(IdentityConflict, match="missing from attempts"):
+        build_matrix(manifest, [job], [])
+
+    # Selected attempt is stale instead of authoritative -> IdentityConflict
+    att_stale = _make_attempt(
+        "a_sel", "j1", "invalid_evaluation", "invalid", disposition="stale"
+    )
+    with pytest.raises(IdentityConflict, match="must have disposition 'authoritative'"):
+        build_matrix(manifest, [job], [att_stale])
+
+    # Multiple authoritative attempts for same fenced job -> IdentityConflict
+    att_auth1 = _make_attempt("a_sel", "j1", "accept", "valid")
+    att_auth2 = _make_attempt("a_other", "j1", "reject", "valid")
+    with pytest.raises(IdentityConflict, match="multiple authoritative attempts"):
+        build_matrix(manifest, [job], [att_auth1, att_auth2])
+
+
+def test_build_matrix_run_id_and_coordinate_conflicts() -> None:
+    """Reject mismatched run_id and duplicate job coordinates."""
+    manifest = _make_manifest(run_id="run-1", max_repetitions=1)
+    wrong_run_job = Job(
+        job_id="j1",
+        run_id="other-run",
+        task_key="task-1",
+        case_id="case-1",
+        verifier_key="v-1",
+        repetition=0,
+        state="DONE",
+        fence=1,
+        attempt_id="a1",
+        lease_token=None,
+        worker_id=None,
+        lease_expires_ms=None,
+        attempts_started=1,
+        selected_attempt_id="a1",
+        terminal_reason=None,
+    )
+    with pytest.raises(IdentityConflict, match="does not match manifest run_id"):
+        build_matrix(manifest, [wrong_run_job], [])
+
+    j_a = Job(
+        job_id="j_a",
+        run_id="run-1",
+        task_key="task-1",
+        case_id="case-1",
+        verifier_key="v-1",
+        repetition=0,
+        state="DONE",
+        fence=1,
+        attempt_id="a1",
+        lease_token=None,
+        worker_id=None,
+        lease_expires_ms=None,
+        attempts_started=1,
+        selected_attempt_id="a1",
+        terminal_reason=None,
+    )
+    j_b = Job(
+        job_id="j_b",
+        run_id="run-1",
+        task_key="task-1",
+        case_id="case-1",
+        verifier_key="v-1",
+        repetition=0,
+        state="DONE",
+        fence=1,
+        attempt_id="a2",
+        lease_token=None,
+        worker_id=None,
+        lease_expires_ms=None,
+        attempts_started=1,
+        selected_attempt_id="a2",
+        terminal_reason=None,
+    )
+    with pytest.raises(IdentityConflict, match="Duplicate job coordinate"):
+        build_matrix(manifest, [j_a, j_b], [])
+
+
+def test_build_matrix_phase1_vertical_slice_30_jobs_to_10_cells() -> None:
+    """Phase 1 slice: 1 task * 5 cases * 2 verifiers * 3 reps = 30 jobs -> 10 cells."""
+    case_ids = ("c1", "c2", "c3", "c4", "c5")
+    verifiers = ("v1", "v2")
+    pin = TaskPin(
+        task_key="retry-contract@1.0.0",
+        task_version="1.0.0",
+        contract_hash="c" * 64,
+        repository_snapshot_digest="s" * 64,
+        environment_id="env-fixture",
+        environment_image_digest=None,
+        verifier_baseline_version="v1",
+        verifier_candidate_version="v2",
+        baseline_manifest_hash="b" * 64,
+        candidate_manifest_hash="d" * 64,
+        case_ids=case_ids,
+    )
+    manifest = AuditManifest(
+        manifest_hash="mhash" + "0" * 59,
+        run_id="slice-run",
+        benchmark_version="v1",
+        task_pins=(pin,),
+        panel_key="retry-contract-panel@1.0.0",
+        adjudication_version="adj-v1",
+        evaluation_harness_version="harn-v1",
+        config_hash="conf1" + "0" * 59,
+        policy_hash="pol1" + "0" * 60,
+        analysis_plan_hash=None,
+        timestamp=datetime(2026, 1, 1, tzinfo=UTC),
+        host_fingerprint="arm64",
+        seed=42,
+        agent_version=None,
+        model_identifier=None,
+        max_repetitions=3,
+        max_attempts_per_job=3,
+        timeout_seconds=120,
+        resource_policy="res1" + "0" * 60,
+        expansion_digest="exp1" + "0" * 60,
+        parent_run_id=None,
+    )
+
+    jobs: list[Job] = []
+    attempts: list[EvaluationAttempt] = []
+    cases_dict: dict[str, PatchCase] = {}
+    adjs_dict: dict[str, Adjudication] = {}
+
+    for c_idx, cid in enumerate(case_ids):
+        role = "reference" if c_idx == 0 else ("noop" if c_idx == 4 else "challenge")
+        label = "valid" if c_idx in (0, 1, 4) else "invalid"
+        cases_dict[cid] = PatchCase(
+            case_id=cid,
+            task_key="retry-contract@1.0.0",
+            diff_digest="d" * 64,
+            base_snapshot_digest="s" * 64,
+            source="reference"
+            if role == "reference"
+            else ("noop" if role == "noop" else "human"),
+            source_run_id=None,
+            parent_case_ids=(),
+            family_id=f"fam-{c_idx}",
+            role=role,  # type: ignore[arg-type]
+            provenance_digest="p" * 64,
+            licence="MIT",
+            created_at=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+        adjs_dict[cid] = Adjudication(
+            adjudication_id=f"adj-{cid}",
+            case_id=cid,
+            contract_hash="c" * 64,
+            version=1,
+            label=label,  # type: ignore[arg-type]
+            review_status="provisional",
+            votes=(),
+            rationale="synthetic fixture",
+            requirement_hashes=(),
+            witness_ids=(),
+            uncertainty="none",
+            supersedes_id=None,
+            created_at=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+
+        for vid in verifiers:
+            for rep in range(3):
+                jid = f"job-{cid}-{vid}-{rep}"
+                aid = f"att-{cid}-{vid}-{rep}"
+                # v1 accepts all; v2 rejects invalid cases & c1 alt
+                outcome = "accept" if vid == "v1" or c_idx in (0, 4) else "reject"
+                jobs.append(
+                    Job(
+                        job_id=jid,
+                        run_id="slice-run",
+                        task_key="retry-contract@1.0.0",
+                        case_id=cid,
+                        verifier_key=vid,
+                        repetition=rep,
+                        state="DONE",
+                        fence=1,
+                        attempt_id=aid,
+                        lease_token=None,
+                        worker_id=None,
+                        lease_expires_ms=None,
+                        attempts_started=1,
+                        selected_attempt_id=aid,
+                        terminal_reason=None,
+                    )
+                )
+                attempts.append(_make_attempt(aid, jid, outcome, "valid"))
+
+    # Include two excluded stale/abandoned retries on the first job to verify reversal invariance
+    extra_stale = _make_attempt(
+        "att-excluded-1",
+        jobs[0].job_id,
+        None,
+        "invalid",
+        error_code="CRASH",
+        disposition="stale",
+    )
+    extra_abandoned = _make_attempt(
+        "att-excluded-2",
+        jobs[0].job_id,
+        None,
+        "invalid",
+        error_code="LEASE_EXPIRED",
+        disposition="abandoned",
+    )
+    attempts.extend([extra_abandoned, extra_stale])
+
+    assert len(jobs) == 30
+    ts = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+    m1 = build_matrix(manifest, jobs, attempts, adjs_dict, cases_dict, created_at=ts)
+    m2 = build_matrix(
+        manifest,
+        list(reversed(jobs)),
+        list(reversed(attempts)),
+        adjs_dict,
+        cases_dict,
+        created_at=ts,
+    )
+
+    assert m1.complete is True
+    assert len(m1.cells) == 10
+    assert m1.matrix_id == m2.matrix_id
+    assert m1.source_attempts_digest == m2.source_attempts_digest
+    assert [c.outcome for c in m1.cells] == [c.outcome for c in m2.cells]
+
+
+def test_matrix_validation_and_fencing_edge_cases() -> None:
+    manifest = _make_manifest()
+    pinned_manifest = AuditManifest(
+        manifest_hash=manifest.manifest_hash,
+        run_id=manifest.run_id,
+        benchmark_version=manifest.benchmark_version,
+        task_pins=(
+            TaskPin(
+                task_key="task-1",
+                task_version="1.0.0",
+                contract_hash="c" * 64,
+                repository_snapshot_digest="s" * 64,
+                environment_id="env-1",
+                environment_image_digest=None,
+                verifier_baseline_version="v-1",
+                verifier_candidate_version="v-1",
+                baseline_manifest_hash="b" * 64,
+                candidate_manifest_hash="d" * 64,
+                case_ids=("case-1",),
+            ),
+        ),
+        panel_key=manifest.panel_key,
+        adjudication_version=manifest.adjudication_version,
+        evaluation_harness_version=manifest.evaluation_harness_version,
+        config_hash=manifest.config_hash,
+        policy_hash=manifest.policy_hash,
+        analysis_plan_hash=None,
+        timestamp=manifest.timestamp,
+        host_fingerprint=manifest.host_fingerprint,
+        seed=manifest.seed,
+        agent_version=None,
+        model_identifier=None,
+        max_repetitions=manifest.max_repetitions,
+        max_attempts_per_job=manifest.max_attempts_per_job,
+        timeout_seconds=manifest.timeout_seconds,
+        resource_policy=manifest.resource_policy,
+        expansion_digest=manifest.expansion_digest,
+        parent_run_id=None,
+    )
+    # Unplanned job coordinate rejected when pins are explicit
+    extra_job = Job(
+        job_id="job-extra",
+        run_id="run-1",
+        task_key="task-1",
+        case_id="case-unplanned",
+        verifier_key="v-1",
+        repetition=0,
+        state="DONE",
+        fence=1,
+        attempt_id="a-extra",
+        lease_token=None,
+        worker_id=None,
+        lease_expires_ms=None,
+        attempts_started=1,
+        selected_attempt_id="a-extra",
+        terminal_reason=None,
+    )
+    extra_att = _make_attempt("a-extra", "job-extra", "accept", "valid")
+    with pytest.raises(ValidationError, match="unplanned"):
+        build_matrix(
+            pinned_manifest,
+            [
+                Job(
+                    job_id="j1",
+                    run_id="run-1",
+                    task_key="task-1",
+                    case_id="case-1",
+                    verifier_key="v-1",
+                    repetition=0,
+                    state="DONE",
+                    fence=1,
+                    attempt_id="a1",
+                    lease_token=None,
+                    worker_id=None,
+                    lease_expires_ms=None,
+                    attempts_started=1,
+                    selected_attempt_id="a1",
+                    terminal_reason=None,
+                ),
+                extra_job,
+            ],
+            [_make_attempt("a1", "j1", "accept", "valid"), extra_att],
+        )
+
+    # Requested selected_attempt_id absent in aggregate_cell raises IdentityConflict
+    with pytest.raises(IdentityConflict, match="missing"):
+        aggregate_cell(
+            task_key="task-1",
+            repository_id="repo-1",
+            case_id="case-1",
+            verifier_key="v-1",
+            adjudication_id="adj-1",
+            label="valid",
+            role="challenge",
+            planned_repetitions=1,
+            attempts=[_make_attempt("att-other", "j1", "accept", "valid")],
+            job_repetition_map={"j1": 0},
+            selected_attempt_by_job={"j1": "att-expected"},
+        )
+
+    # Older-fence selected_attempt raises IdentityConflict
+    older_att = EvaluationAttempt(
+        attempt_id="att-old-fence",
+        job_id="j1",
+        fence=1,
+        outcome="accept",
+        evaluation_validity="valid",
+        error_code=None,
+        disposition="authoritative",
+        started_at=datetime.now(UTC),
+        finished_at=datetime.now(UTC),
+        exit_code=0,
+        stdout_hash=None,
+        stderr_hash=None,
+        report_digest=None,
+        test_collection=("t1",),
+        tests_passed=1,
+        tests_failed=0,
+        resources=ResourceUsage(None, None, None, None, None, None, None, None),
+        artifact_digests=(),
+        capture_truncated=False,
+    )
+    fenced_job = Job(
+        job_id="j1",
+        run_id="run-1",
+        task_key="task-1",
+        case_id="case-1",
+        verifier_key="v-1",
+        repetition=0,
+        state="DONE",
+        fence=2,
+        attempt_id="att-old-fence",
+        lease_token=None,
+        worker_id=None,
+        lease_expires_ms=None,
+        attempts_started=2,
+        selected_attempt_id="att-old-fence",
+        terminal_reason=None,
+    )
+    with pytest.raises(IdentityConflict, match="fence 1, expected job fence 2"):
+        build_matrix(manifest, [fenced_job], [older_att])
+
+    # Exhausted infra retries: FAILED job with abandoned attempt & no selected attempt
+    failed_job = Job(
+        job_id="j1",
+        run_id="run-1",
+        task_key="task-1",
+        case_id="case-1",
+        verifier_key="v-1",
+        repetition=0,
+        state="FAILED",
+        fence=3,
+        attempt_id=None,
+        lease_token=None,
+        worker_id=None,
+        lease_expires_ms=None,
+        attempts_started=3,
+        selected_attempt_id=None,
+        terminal_reason="LEASE_EXPIRED",
+    )
+    abandoned_att = _make_attempt(
+        "att-abandoned",
+        "j1",
+        None,
+        "invalid",
+        error_code="LEASE_EXPIRED",
+        disposition="abandoned",
+    )
+    failed_matrix = build_matrix(manifest, [failed_job], [abandoned_att])
+    assert failed_matrix.complete is True
+    assert failed_matrix.cells[0].outcome == "error"
+    assert failed_matrix.cells[0].evaluation_validity == "invalid"
+    assert "LEASE_EXPIRED" in failed_matrix.cells[0].diagnostic_codes
+
+    # Coexisting explicit case_ids pin and derived empty case_ids pin
+    mixed_manifest = AuditManifest(
+        manifest_hash=manifest.manifest_hash,
+        run_id=manifest.run_id,
+        benchmark_version=manifest.benchmark_version,
+        task_pins=(
+            TaskPin(
+                task_key="task-explicit",
+                task_version="1.0.0",
+                contract_hash="c" * 64,
+                repository_snapshot_digest="s" * 64,
+                environment_id="env-1",
+                environment_image_digest=None,
+                verifier_baseline_version="v-1",
+                verifier_candidate_version="v-1",
+                baseline_manifest_hash="b" * 64,
+                candidate_manifest_hash="d" * 64,
+                case_ids=("case-explicit",),
+            ),
+            TaskPin(
+                task_key="task-derived",
+                task_version="1.0.0",
+                contract_hash="c" * 64,
+                repository_snapshot_digest="s" * 64,
+                environment_id="env-2",
+                environment_image_digest=None,
+                verifier_baseline_version="v-1",
+                verifier_candidate_version="v-1",
+                baseline_manifest_hash="b" * 64,
+                candidate_manifest_hash="d" * 64,
+                case_ids=(),
+            ),
+        ),
+        panel_key=manifest.panel_key,
+        adjudication_version=manifest.adjudication_version,
+        evaluation_harness_version=manifest.evaluation_harness_version,
+        config_hash=manifest.config_hash,
+        policy_hash=manifest.policy_hash,
+        analysis_plan_hash=None,
+        timestamp=manifest.timestamp,
+        host_fingerprint=manifest.host_fingerprint,
+        seed=manifest.seed,
+        agent_version=None,
+        model_identifier=None,
+        max_repetitions=1,
+        max_attempts_per_job=1,
+        timeout_seconds=manifest.timeout_seconds,
+        resource_policy=manifest.resource_policy,
+        expansion_digest=manifest.expansion_digest,
+        parent_run_id=None,
+    )
+    mixed_matrix = build_matrix(
+        mixed_manifest,
+        [
+            Job(
+                job_id="je",
+                run_id="run-1",
+                task_key="task-explicit",
+                case_id="case-explicit",
+                verifier_key="v-1",
+                repetition=0,
+                state="DONE",
+                fence=1,
+                attempt_id="ae",
+                lease_token=None,
+                worker_id=None,
+                lease_expires_ms=None,
+                attempts_started=1,
+                selected_attempt_id="ae",
+                terminal_reason=None,
+            ),
+            Job(
+                job_id="jd",
+                run_id="run-1",
+                task_key="task-derived",
+                case_id="case-from-jobs",
+                verifier_key="v-1",
+                repetition=0,
+                state="DONE",
+                fence=1,
+                attempt_id="ad",
+                lease_token=None,
+                worker_id=None,
+                lease_expires_ms=None,
+                attempts_started=1,
+                selected_attempt_id="ad",
+                terminal_reason=None,
+            ),
+        ],
+        [
+            _make_attempt("ae", "je", "accept", "valid"),
+            _make_attempt("ad", "jd", "accept", "valid"),
+        ],
+    )
+    assert mixed_matrix.complete is True
+    assert len(mixed_matrix.cells) == 2

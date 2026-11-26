@@ -48,6 +48,18 @@ def parse_capture(
         if h is not None
     )
 
+    if capture.runtime_error == ErrorCode.DIGEST_MISMATCH.value or (
+        capture.runtime_error is not None
+        and capture.runtime_error.startswith(ErrorCode.DIGEST_MISMATCH.value)
+    ):
+        return ParsedOutcome(
+            outcome="error",
+            evaluation_validity="invalid",
+            error_code=ErrorCode.DIGEST_MISMATCH.value,
+            report=None,
+            evidence_digests=evidence_digests,
+        )
+
     # Tier 1 & 2 & 3: Check runtime_error diagnostics and build_exit_code
     tier_2_runtime_codes = {
         ErrorCode.PATCH_ERROR.value,

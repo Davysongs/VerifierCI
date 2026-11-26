@@ -1,2 +1,39 @@
-{"manifest_id": "retry-contract-snapshot-v1", "version": "1.0.0", "description": "Versioned tiny snapshot manifest fixture for the retry-contract example. No source archives are stored here.", "task_id": "retry-contract", "snapshot_digest": "0000000000000000000000000000000000000000000000000000000000000000", "commit_oid": "synthetic-fixture-no-upstream-commit", "archive_uri": "examples/retry-contract/source/", "environment_id": "cpython-3.12-fixture-v1", "created_at": "2026-09-16T00:00:00Z", "notes": "Synthetic fixture manifest only. snapshot_digest is a placeholder; real digest is computed at import time."}
-
+{
+  "manifest_id": "retry-contract-snapshot-v1",
+  "version": "1.0.0",
+  "description": "Trusted fixture snapshot and digest manifest for the synthetic retry-contract example (SDD \u00a71.3).",
+  "task_id": "retry-contract",
+  "task_key": "retry-contract@1.0.0",
+  "panel_key": "retry-contract-panel@1.0.0",
+  "contract_hash": "bba8c620c54093715e6eb108a9d41e77b0592f59b4d6f4b6a8bb60cece2dd36e",
+  "snapshot_digest": "44047fea267d2e1a124b1fcdcb28953c73d7cd425fa53291276c04b26144b1fc",
+  "commit_oid": "synthetic-fixture-no-upstream-commit",
+  "archive_uri": "examples/retry-contract/source/",
+  "environment_id": "cpython-3.12-fixture-v1",
+  "trusted_verifiers": {
+    "retry-contract-v1@1.0.0": {
+      "payload_digest": "151298bced9a9052025a6c85320c3d76f9c28d97662be61f343e70bc83d3d5f7",
+      "manifest_hash": "001f2678e060754b2ebc46dd8ca0d9be1925c6559811b7fb1919d804f94d9ca5"
+    },
+    "retry-contract-v2@1.0.0": {
+      "payload_digest": "c0649710a029af9486b4b28e94c263cbef710f4bbc53aa2485ab083a83d04937",
+      "manifest_hash": "56b57080466c15357f36647da93e1b3d27d057eb842350148a0fe0c6bbd1f489"
+    }
+  },
+  "trusted_case_diffs": {
+    "case-reference": "d228dcd7333793f84adfa6fa935978dabc2cdfaee5a12421c462ec87164ccd4f",
+    "case-valid-alternative": "c5329e0da3c0b21409a7f7865606ce81e2db057c10bc06d9458ec4b940906f9e",
+    "case-retries-permanent": "63b9bbdfbbd5b0e1ffad8ed7cb016a765ec0c2ef4c88df885b5ec07e6a345efc",
+    "case-exceeds-retry-count": "54cdec35290d40062262cb51d47426a58762f16af499a690fd6f7c2f338cf19e",
+    "case-noop": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "trusted_witnesses": {
+    "sequences/permanent-retry-sequence.json": "cf7540ab67cfaefe01283f478fd3de178ebab603a553fdf9213e5d2f88c70c9c",
+    "sequences/exceed-count-sequence.json": "de13cb1ff72a2fbc10d97d334dc6345b23e79970ebc5d351d75e4034b4785e3f"
+  },
+  "synthetic": true,
+  "review_status": "provisional",
+  "diagnostic_only": true,
+  "created_at": "2026-09-16T00:00:00Z",
+  "notes": "Synthetic/provisional diagnostic fixture manifest with pinned SHA-256 digests. Not for release gate or benchmark claims."
+}

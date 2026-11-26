@@ -19,6 +19,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from verifierci.adapters.local import hash_snapshot_directory
 from verifierci.errors import (
     ErrorCode,
     ProtectionError,
@@ -142,6 +143,8 @@ def prepare_workspace(
     snapshot_dir: Path,
     diff_bytes: bytes | None,
     allowed_paths: tuple[str, ...] = ("src/", "tests/"),
+    *,
+    expected_snapshot_digest: str | None = None,
 ) -> Path:
     """Prepare a fresh attempt workspace directory structure.
 
@@ -212,6 +215,15 @@ def prepare_workspace(
                 except OSError:
                     pass
                 shutil.copy2(src_path, dest, follow_symlinks=False)
+
+    if expected_snapshot_digest is not None:
+        actual_snapshot_digest = hash_snapshot_directory(source_dir)
+        if actual_snapshot_digest != expected_snapshot_digest:
+            raise ProtectionError(
+                f"Staged snapshot digest mismatch for '{job.task_key}': "
+                f"expected {expected_snapshot_digest}, got {actual_snapshot_digest}.",
+                code=ErrorCode.DIGEST_MISMATCH.value,
+            )
 
     # 2. Apply patch if provided
     if diff_bytes and diff_bytes.strip():

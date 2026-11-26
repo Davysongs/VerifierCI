@@ -8,7 +8,7 @@
 verifier_id: retry-contract-v1
 version: "1.0.0"
 mode: compatibility
-command: ["python", "-m", "pytest", "tests/", "--json-report", "--json-report-file=/out/report.json", "-q"]
+command: ["python3", "tests/run_v1.py", "{out}"]
 build_command: []
 parser_id: pytest-report-v1
 report_path: "report.json"

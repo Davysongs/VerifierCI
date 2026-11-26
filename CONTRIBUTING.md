@@ -1,16 +1,19 @@
 # Contributing to VerifierCI
 
-Thanks for your interest in VerifierCI. This repository is currently an MVP skeleton, so contributions should stay scoped to the foundations unless a specific feature is assigned.
+Thanks for your interest in VerifierCI. Contributions should follow the phased architecture and module contracts defined in `build/VerifierCI-Software-Design-Document.md` and `docs/`.
 
 ## Development flow
 
-- Keep changes small and narrowly scoped.
-- Prefer package-level modules with explicit, tested interfaces.
-- Include/update tests for behavioral changes.
-- Update docs when project state changes.
+- Keep changes small, narrowly scoped, and aligned with the current implementation phase (currently Phase 1: Minimal Vertical Slice).
+- Preserve domain model immutability (`@dataclass(frozen=True, slots=True)`), canonical serialization invariants, and lease-fencing guarantees.
+- Include or update unit and integration tests for all behavioral changes.
+- Update documentation when project state or module contracts change.
 
-## Quality expectations
+## Validation expectations
 
-- Add or update tests for new behavior.
-- Keep modules small and explicit.
-- Avoid adding integrations without a schema or workflow contract.
+Before submitting changes, verify that all checks pass:
+
+- `make lint`
+- `ruff check .` and `ruff format --check .`
+- `PYTHONPATH=src mypy src tests`
+- `make test-unit` and `make test-integration`

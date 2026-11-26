@@ -1,1 +1,5 @@
-"""verifierci.snapshots — snapshot registry (Phase 1 skeleton)."""
+"""verifierci.snapshots — local snapshot and trusted fixture digest registry."""
+
+from verifierci.snapshots.registry import SnapshotRegistry, TrustedFixtureRecord
+
+__all__ = ["SnapshotRegistry", "TrustedFixtureRecord"]
